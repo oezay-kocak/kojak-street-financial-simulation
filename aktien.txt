@@ -1,0 +1,300 @@
+USA, Automobil, Tesla Inc, TSLA
+USA, Automobil, Ford Motor Co, F
+USA, Automobil, General Motors, GM
+USA, Automobil, Rivian Automotive, RIVN
+Japan, Automobil, Toyota Motor Corp, TM
+Japan, Automobil, Honda Motor Co, HMC
+Japan, Automobil, Nissan Motor Co, NSANY
+Japan, Automobil, Suzuki Motor Corp, SZKMY
+Großbritannien, Automobil, Aston Martin Lagonda, AML
+Großbritannien, Automobil, McLaren Group, MCLN
+Großbritannien, Automobil, Rolls-Royce Motor Cars, RR
+Großbritannien, Automobil, Jaguar Land Rover, JLR
+EU, Automobil, Volkswagen AG, VOW3
+EU, Automobil, Renault SA, RNO
+EU, Automobil, Stellantis NV, STLAM
+EU, Automobil, Ferrari NV, RACE
+China, Automobil, BYD Company, BYDDY
+China, Automobil, NIO Inc, NIO
+China, Automobil, Li Auto Inc, LI
+China, Automobil, Geely Automobile, GELYF
+USA, Chemie, Dow Inc, DOW
+USA, Chemie, DuPont de Nemours, DD
+USA, Chemie, Air Products & Chemicals, APD
+USA, Chemie, Albemarle Corp, ALB
+Japan, Chemie, Shin-Etsu Chemical, SHECY
+Japan, Chemie, Mitsubishi Chemical, MICLY
+Japan, Chemie, Sumitomo Chemical, SOMMY
+Japan, Chemie, Asahi Kasei Corp, AHKSY
+Großbritannien, Automobil, Croda International, CRDA
+Großbritannien, Automobil, Johnson Matthey, JMAT
+Großbritannien, Automobil, Elementis Plc, ELM
+Großbritannien, Automobil, Synthomer Plc, SYNT
+EU, Chemie, BASF SE, BAS
+EU, Chemie, Air Liquide, AI
+EU, Chemie, Eni Chemical Division, ENI
+EU, Chemie, Sika AG, SIKA
+China, Chemie, Sinopec Chemical, SNP
+China, Chemie, Wanhua Chemical, 600309
+China, Chemie, PetroChina Chemical, PTR
+China, Chemie, Rongsheng Petrochemical, 002493
+USA, Öl und Gas, Exxon Mobil Corp, XOM
+USA, Öl und Gas, Chevron Corp, CVX
+USA, Öl und Gas, ConocoPhillips, COP
+USA, Öl und Gas, Marathon Petroleum, MPC
+Japan, Öl und Gas, Inpex Corp, IPXHY
+Japan, Öl und Gas, Eneos Holdings, ERNYY
+Japan, Öl und Gas, Idemitsu Kosan, IDKOY
+Japan, Öl und Gas, Cosmo Energy, CMDYF
+Großbritannien, Öl und Gas, Shell Plc, SHEL
+Großbritannien, Öl und Gas, BP Plc, BP
+Großbritannien, Öl und Gas, Harbour Energy, HBR
+Großbritannien, Öl und Gas, Ithaca Energy, ITH
+EU, Öl und Gas, Wintershall Dea, WND
+EU, Öl und Gas, TotalEnergies SE, TTE
+EU, Öl und Gas, Eni S.p.A., ENI
+EU, Öl und Gas, Transocean Ltd, RIG
+China, Öl und Gas, CNOOC Ltd, CEO
+China, Öl und Gas, PetroChina, PTR
+China, Öl und Gas, Sinopec Corp, SNP
+China, Öl und Gas, Shaanxi Yanchang, 600248
+USA, Stromerzeuger, NextEra Energy, NEE
+USA, Stromerzeuger, Duke Energy Corp, DUK
+USA, Stromerzeuger, Southern Co, SO
+USA, Stromerzeuger, Constellation Energy, CEG
+Japan, Stromerzeuger, Tokyo Electric Power, TKECF
+Japan, Stromerzeuger, Kansai Electric Power, KAEPF
+Japan, Stromerzeuger, Chubu Electric Power, CHUEF
+Japan, Stromerzeuger, Tohoku Electric Power, TEPCF
+Großbritannien, Stromerzeuger, National Grid Plc, NGG
+Großbritannien, Stromerzeuger, SSE Plc, SSEZY
+Großbritannien, Stromerzeuger, Centrica Plc, CPYYY
+Großbritannien, Stromerzeuger, Drax Group, DRXGY
+EU, Stromerzeuger, E.ON SE, EOAN
+EU, Stromerzeuger, Engie SA, ENGI
+EU, Stromerzeuger, Enel S.p.A., ENEL
+EU, Stromerzeuger, Alpiq Holding, ALPH
+China, Stromerzeuger, China Yangtze Power, CYPCY
+China, Stromerzeuger, China National Nuclear, 601985
+China, Stromerzeuger, China Longyuan Power, CLYNF
+China, Stromerzeuger, Huaneng Power, HNP
+USA, Maschinenbau, Caterpillar Inc, CAT
+USA, Maschinenbau, Deere & Co, DE
+USA, Maschinenbau, General Electric, GE
+USA, Maschinenbau, Parker-Hannifin, PH
+Japan, Maschinenbau, Komatsu Ltd, KMTUY
+Japan, Maschinenbau, Kubota Corp, KUBTY
+Japan, Maschinenbau, Fanuc Corp, FANUY
+Japan, Maschinenbau, Yaskawa Electric, YASKY
+Großbritannien, Maschinenbau, Rolls-Royce Holdings, RYCEY
+Großbritannien, Maschinenbau, Weir Group, WEIR
+Großbritannien, Maschinenbau, Spirax-Sarco Engineering, SPX
+Großbritannien, Maschinenbau, IMI Plc, IMI
+EU, Maschinenbau, Siemens AG, SIE
+EU, Maschinenbau, Schneider Electric (FR), SU
+EU, Maschinenbau, Leonardo S.p.A., LDO
+EU, Maschinenbau, ABB Ltd, ABBN
+China, Maschinenbau, Sany Heavy Industry, SNYYF
+China, Maschinenbau, Zoomlion Heavy Industry, ZLIOY
+China, Maschinenbau, XCMG Construction, 000425
+China, Maschinenbau, Weichai Power, WEICY
+USA, Telekommunikation, AT&T Inc, T
+USA, Telekommunikation, Verizon Communications, VZ
+USA, Telekommunikation, T-Mobile US, TMUS
+USA, Telekommunikation, Comcast Corp, CMCSA
+Japan, Telekommunikation, Nippon Telegraph & Telephone, NTTYY
+Japan, Telekommunikation, KDDI Corp, KDDIY
+Japan, Telekommunikation, SoftBank Group, SFTBY
+Japan, Telekommunikation, Rakuten Group, RKUNY
+Großbritannien, Telekommunikation, Vodafone Group, VOD
+Großbritannien, Telekommunikation, BT Group Plc, BTGOY
+Großbritannien, Telekommunikation, Tree UK (Hutchison), CKHUY
+Großbritannien, Telekommunikation, Liberty Global (Virgin), LBTYA
+EU, Telekommunikation, Deutsche Telekom AG, DTE
+EU, Telekommunikation, Orange SA, ORA
+EU, Telekommunikation, Telecom Italia, TIT
+EU, Telekommunikation, Swisscom AG, SCMN
+China, Telekommunikation, China Mobile, CHL
+China, Telekommunikation, China Telecom, CHA
+China, Telekommunikation, China Unicom, CHU
+China, Telekommunikation, ZTE Corp, ZTCOF
+USA, Einzelhandel, Walmart Inc, WMT
+USA, Einzelhandel, Amazon.com Inc, AMZN
+USA, Einzelhandel, Costco Wholesale, COST
+USA, Einzelhandel, Home Depot, HD
+Japan, Einzelhandel, Seven & i Holdings (7-Eleven), SVNDY
+Japan, Einzelhandel, Fast Retailing (Uniqlo), FRCOY
+Japan, Einzelhandel, Aeon Co Ltd, AONNY
+Japan, Einzelhandel, Pan Pacific International (Donki), DQJCY
+Großbritannien, Einzelhandel, Tesco Plc, TSCDY
+Großbritannien, Einzelhandel, J Sainsbury Plc, JSAIY
+Großbritannien, Einzelhandel, Marks & Spencer, MAKSY
+Großbritannien, Einzelhandel, JD Sports Fashion, JDSPY
+EU, Einzelhandel, Zalando SE, ZAL
+EU, Einzelhandel, Carrefour SA, CA
+EU, Einzelhandel, Esselunga S.p.A., ESS
+EU, Einzelhandel, Richemont SA, CFR
+China, Einzelhandel, Alibaba Group, BABA
+China, Einzelhandel, JD.com Inc, JD
+China, Einzelhandel, PDD Holdings (Temu), PDD
+China, Einzelhandel, Meituan, MPNGF
+USA, Konsumgüter, Procter & Gamble, PG
+USA, Konsumgüter, Coca-Cola Co, KO
+USA, Konsumgüter, PepsiCo Inc, PEP
+USA, Konsumgüter, Philip Morris International, PM
+Japan, Konsumgüter, Sony Group Corp, SONY
+Japan, Konsumgüter, Nintendo Co Ltd, NTDOY
+Japan, Konsumgüter, Shiseido Co, SSDOY
+Japan, Konsumgüter, Ajinomoto Co, AJINY
+Großbritannien, Konsumgüter, Unilever Plc, UL
+Großbritannien, Konsumgüter, Diageo Plc, DEO
+Großbritannien, Konsumgüter, British American Tobacco, BTI
+Großbritannien, Konsumgüter, Reckitt Benckiser, RBGLY
+EU, Konsumgüter, Henkel AG, HEN3
+EU, Konsumgüter, L'Oréal SA, OR
+EU, Konsumgüter, Campari Group, CPR
+EU, Konsumgüter, Nestlé SA, NESN
+China, Konsumgüter, Kweichow Moutai, 600519
+China, Konsumgüter, WH Group, WHGLY
+China, Konsumgüter, Tsingtao Brewery, TSGTY
+China, Konsumgüter, Nongfu Spring, NNFSF
+USA, Finanzen, JPMorgan Chase & Co, JPM
+USA, Finanzen, Bank of America, BAC
+USA, Finanzen, Goldman Sachs Group, GS
+USA, Finanzen, Morgan Stanley, MS
+Japan, Finanzen, Mitsubishi UFJ Financial, MUFG
+Japan, Finanzen, Sumitomo Mitsui Financial, SMFG
+Japan, Finanzen, Mizuho Financial Group, MFG
+Japan, Finanzen, Nomura Holdings, NMR
+Großbritannien, Finanzen, HSBC Holdings, HSBC
+Großbritannien, Finanzen, Barclays Plc, BCS
+Großbritannien, Finanzen, Lloyds Banking Group, LYG
+Großbritannien, Finanzen, NatWest Group, NWG
+EU, Finanzen, Deutsche Bank AG, DB
+EU, Finanzen, BNP Paribas, BNP
+EU, Finanzen, Intesa Sanpaolo, ISP
+EU, Finanzen, UBS Group AG, UBS
+China, Finanzen, Industrial & Commercial Bank of China, IDCBY
+China, Finanzen, China Construction Bank, CICHY
+China, Finanzen, Agricultural Bank of China, ACGBY
+China, Finanzen, Bank of China, BACHY
+USA, Edelmetallförderer, Newmont Corp, NEM
+USA, Edelmetallförderer, Freeport-McMoRan, FCX
+USA, Edelmetallförderer, Southern Copper, SCCO
+USA, Edelmetallförderer, Hecla Mining, HL
+Japan, Edelmetallförderer, Sumitomo Metal Mining, SMMYY
+Japan, Edelmetallförderer, Mitsui Mining & Smelting, MNSMY
+Japan, Edelmetallförderer, Toho Zinc Co, TOZOF
+Japan, Edelmetallförderer, Dowa Holdings, DOWAF
+Großbritannien, Edelmetallförderer, Anglo American Plc, NGLOY
+Großbritannien, Edelmetallförderer, Antofagasta Plc, ANFGY
+Großbritannien, Edelmetallförderer, Fresnillo Plc, FNLPF
+Großbritannien, Edelmetallförderer, Hochschild Mining, HCHDF
+EU, Edelmetallförderer, K+S AG, SDF
+EU, Edelmetallförderer, Eramet, ERA
+EU, Edelmetallförderer, Tenaris S.A., TEN
+EU, Edelmetallförderer, Glencore Plc, GLNCY
+China, Edelmetallförderer, Zijin Mining Group, ZI JMF
+China, Edelmetallförderer, China Molybdenum, CMCLF
+China, Edelmetallförderer, Jiangxi Copper, JIXAY
+China, Edelmetallförderer, Shandong Gold, SDHGF
+USA, Gesundheit, Johnson & Johnson, JNJ
+USA, Gesundheit, Eli Lilly & Co, LLY
+USA, Gesundheit, Pfizer Inc, PFE
+USA, Gesundheit, Merck & Co, MRK
+Japan, Gesundheit, Takeda Pharmaceutical, TAK
+Japan, Gesundheit, Astellas Pharma, ALPMY
+Japan, Gesundheit, Daiichi Sankyo, DSNKY
+Japan, Gesundheit, Eisai Co, ESALY
+Großbritannien, Gesundheit, AstraZeneca Plc, AZN
+Großbritannien, Gesundheit, GSK Plc, GSK
+Großbritannien, Gesundheit, Smith & Nephew, SNN
+Großbritannien, Gesundheit, Hikma Pharmaceuticals, HKMPY
+EU, Gesundheit, Bayer AG, BAYN
+EU, Gesundheit, Sanofi SA, SAN
+EU, Gesundheit, Recordati S.p.A., REC
+EU, Gesundheit, Novartis AG, NOVN
+China, Gesundheit, Jiangsu Hengrui Medicine, 600276
+China, Gesundheit, WuXi AppTec, WIXDF
+China, Gesundheit, Sinopharm Group, SHTDY
+China, Gesundheit, Shanghai Fosun Pharma, SFXOF
+USA, Technologie, Microsoft Corp, MSFT
+USA, Technologie, Apple Inc, AAPL
+USA, Technologie, NVIDIA Corp, NVDA
+USA, Technologie, Alphabet Inc (Google), GOOGL
+Japan, Technologie, Keyence Corp, KYCCF
+Japan, Technologie, Tokyo Electron, TOELY
+Japan, Technologie, Murata Manufacturing, MRAWY
+Japan, Technologie, Advantest Corp, ATEYY
+Großbritannien, Technologie, ARM Holdings, ARM
+Großbritannien, Technologie, Sage Group Plc, SGPYY
+Großbritannien, Technologie, Halma Plc, HLMAF
+Großbritannien, Technologie, Renishaw Plc, RNSHF
+EU, Technologie, SAP SE, SAP
+EU, Technologie, Capgemini SE, CAP
+EU, Technologie, STMicroelectronics, STM
+EU, Technologie, Logitech International, LOGN
+China, Technologie, Tencent Holdings, TCEHY
+China, Technologie, Baidu Inc, BIDU
+China, Technologie, Semiconductor Manufacturing (SMIC), SIUIF
+China, Technologie, Lenovo Group, LNVGY
+USA, Immobilien, American Tower Corp, AMT
+USA, Immobilien, Prologis Inc, PLD
+USA, Immobilien, Simon Property Group, SPG
+USA, Immobilien, Digital Realty Trust, DLR
+Japan, Immobilien, Mitsui Fudosan, MTSFY
+Japan, Immobilien, Mitsubishi Estate, MITEY
+Japan, Immobilien, Sumitomo Realty, SURLF
+Japan, Immobilien, Tokyo Tatemono, TYOTF
+Großbritannien, Immobilien, Segro Plc, SEGEF
+Großbritannien, Immobilien, Land Securities Group, LANDF
+Großbritannien, Immobilien, British Land Co, BTLCY
+Großbritannien, Immobilien, Berkeley Group, BKGFY
+EU, Immobilien, Vonovia SE, VNA
+EU, Immobilien, Gecina, GFC
+EU, Immobilien, Immobiliare Grande Distribuzione, IGD
+EU, Immobilien, Swiss Prime Site AG, SPSN
+China, Immobilien, China Overseas Land, CAOVF
+China, Immobilien, China Resources Land, CRBJF
+China, Immobilien, Longfor Group, LGFRY
+China, Immobilien, Poly Developments, 600048
+USA, Transport und Logistik, United Parcel Service, UPS
+USA, Transport und Logistik, FedEx Corp, FDX
+USA, Transport und Logistik, Union Pacific Corp, UNP
+USA, Transport und Logistik, Delta Air Lines, DAL
+Japan, Transport und Logistik, Central Japan Railway, CJPRY
+Japan, Transport und Logistik, East Japan Railway, EJPRY
+Japan, Transport und Logistik, Nippon Yusen (NYK Line), NPNYY
+Japan, Transport und Logistik, Yamato Holdings, YATRY
+Großbritannien, Transport und Logistik, Royal Mail (IDS), Royal
+Großbritannien, Transport und Logistik, EasyJet Plc, EJTTF
+Großbritannien, Transport und Logistik, FirstGroup Plc, FGROF
+Großbritannien, Transport und Logistik, Balfour Beatty, BAFYY
+EU, Transport und Logistik, DHL Group, DHL
+EU, Transport und Logistik, Air France-KLM, AF
+EU, Transport und Logistik, Post Italiane, PST
+EU, Transport und Logistik, Kuehne + Nagel, KNIN
+China, Transport und Logistik, COSCO Shipping, CICOF
+China, Transport und Logistik, SF Holding, 002352
+China, Transport und Logistik, China Southern Airlines, ZNH
+China, Transport und Logistik, MTR Corporation, MTRJY
+USA, Defense, Lockheed Martin, LMT
+USA, Defense, RTX Corporation (Raytheon), RTX
+USA, Defense, Northrop Grumman, NOC
+USA, Defense, General Dynamics, GD
+Japan, Defense, Mitsubishi Heavy Industries, MHVYF
+Japan, Defense, Kawasaki Heavy Industries, KWHIY
+Japan, Defense, IHI Corporation, IHICY
+Japan, Defense, ShinMaywa Industries, SHMDF
+Großbritannien, Defense, BAE Systems Plc, BAESY
+Großbritannien, Defense, Babcock International, BCKIF
+Großbritannien, Defense, QinetiQ Group, QNTQF
+Großbritannien, Defense, Chemring Group, CHMGF
+EU, Defense, Rheinmetall AG, RHM
+EU, Defense, Thales Group, HO
+EU, Defense, Fincantieri S.p.A., FCT
+EU, Defense, Ruag Ammotec, RUA
+China, Defense, Aviation Industry Corp (AVIC), 600760
+China, Defense, China Shipbuilding Industry, 601989
+China, Defense, Norinco (North Industries), 000065
+China, Defense, China Aerospace Science, 600879
