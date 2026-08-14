@@ -15,8 +15,9 @@ running system.
 ## Project Purpose
 
 This repository is a portfolio project for LLM-assisted financial engineering.
-It demonstrates how a finance domain expert can use modern AI coding tools to
-design, implement, test and critically document a complex simulation system.
+It demonstrates how financial domain knowledge can be combined with
+AI-assisted software development to design, implement, test and document a
+complex simulation system.
 
 The goal is not to provide investment advice or a production-grade pricing
 library. The goal is to show applied system design:
@@ -33,17 +34,11 @@ Kojak Street was built by Özay Kocak, a trained banker with long-standing
 interest in economics, politics, history, financial markets, macroeconomics and
 monetary systems.
 
-The project was developed autodidactically from scratch, without a formal
-computer-science degree. The development process combined self-study,
-feedback from software-engineering friends, many iterations, and extensive use
-of LLMs as coding and architecture assistants. The product direction,
-financial concepts and feature ideas were driven by Özay Kocak.
-
-Recommended GitHub repository name:
-
-```text
-kojak-street-financial-simulation
-```
+The project was developed through self-directed learning from scratch. The
+development process combined self-study, feedback from software-engineering
+friends, many iterations, and practical use of LLMs as coding and architecture
+assistants. The product direction, financial concepts and feature ideas were
+driven by Özay Kocak.
 
 ## Current Capabilities
 
@@ -128,7 +123,7 @@ Latest local verification:
 - [Demo Scenarios](docs/demo_scenarios.md)
 - [Screenshot Guide](docs/screenshot_guide.md)
 - [Architecture](docs/architecture.md)
-- [Career Positioning](docs/career_positioning.md)
+- [Project Background](docs/project_background.md)
 - [Migration Plan](docs/migration-plan.md)
 
 ## Demo Path
