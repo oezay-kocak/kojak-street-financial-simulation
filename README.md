@@ -146,3 +146,7 @@ validation.
 
 Its value is in the integrated system: how financial concepts are structured,
 connected, tested, visualized and improved iteratively.
+
+## License
+
+This project is released under the MIT License. See [LICENSE](LICENSE).
