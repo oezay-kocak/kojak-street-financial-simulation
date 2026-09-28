@@ -6,6 +6,8 @@ from collections import defaultdict
 from functools import lru_cache
 from types import ModuleType
 
+from kojakstreet.core.shocks import shock_multiplier
+
 from kojakstreet.core.cryptos import CRYPTO_SERVICE_CODES
 from kojakstreet.core.production_indexes import company_runtimes, main_country_sectors
 from kojakstreet.core.ratings import DEFAULT_RATING, default_probability
@@ -469,6 +471,7 @@ def ensure_processed_products(daten: ModuleType) -> None:
         product.setdefault("users", list(definition["users"]))
         product.setdefault("price_pressure", 0.0)
         product.setdefault("previous_price_pressure", float(product.get("price_pressure", 0.0)))
+        product.setdefault("price_index", 100.0)
         _seed_legacy_flat_market(product, code)
 
 
@@ -668,11 +671,15 @@ def update_production_chain(
         demand = max(18.0, primary_usage[ticker] * 0.55 + base_consumer)
         profile = _balance_profile(ticker)
         potential_supply = max(_initial_supply(ticker) * 0.76, capacities.get(ticker, _initial_supply(ticker)))
+        demand *= shock_multiplier(daten, "demand", ticker)
         supply = _clamp(
             potential_supply,
             demand * profile["supply_floor"],
             demand * profile["supply_ceiling"],
         )
+        # Apply the shared availability state after the normal equilibrium
+        # corridor; otherwise the corridor immediately reconstructs the shock.
+        supply *= shock_multiplier(daten, "supply", ticker)
         inventories = _buffered_inventory(previous_inventories, supply, demand)
         shock_mode = bool(getattr(daten, "aktives_event", None))
         _set_supply_demand(commodity, previous_supply, previous_demand, previous_inventories, supply, demand, inventories, date_label, shock_mode=shock_mode)
@@ -685,16 +692,28 @@ def update_production_chain(
         product["downstream_usage"] = usage
 
     opportunity_scores = _opportunity_scores_by_sector(daten) if rebalance_company_outputs else None
+    company_market_exposures = _company_market_exposures(daten, company_rows)
     _update_company_utilization(
         daten,
         date_label,
         opportunity_scores,
         company_rows,
+        company_market_exposures,
         record_history=record_company_history,
         rebalance_outputs=rebalance_company_outputs,
     )
     if update_country_trade:
-        _update_country_trade_flows(daten, date_label, record_history=record_regional_history)
+        _update_country_trade_flows(
+            daten,
+            date_label,
+            company_rows=company_rows,
+            company_market_exposures=company_market_exposures,
+            record_history=record_regional_history,
+        )
+    if rebalance_company_outputs:
+        # Rebalancing affects the next production step.  Discard the direct
+        # market-reference rows once the monthly mixes have changed.
+        daten._production_company_market_exposures = None
     if rebalance_country_profiles:
         _maybe_rebalance_country_profiles(daten)
 
@@ -910,6 +929,8 @@ def _update_country_trade_flows(
     daten: ModuleType,
     date_label: str,
     *,
+    company_rows=None,
+    company_market_exposures=None,
     record_history: bool = True,
 ) -> None:
     countries = _country_names(daten)
@@ -924,7 +945,9 @@ def _update_country_trade_flows(
         for direction in ("export", "import")
     }
     partner_base_weights = _cached_partner_base_weights(daten, countries)
-    main_sector_by_country = main_country_sectors(company_runtimes(daten))
+    company_rows = company_rows if company_rows is not None else company_runtimes(daten)
+    company_market_exposures = company_market_exposures or _company_market_exposures(daten, company_rows)
+    main_sector_by_country = main_country_sectors(company_rows)
 
     def append_history(target: dict, key: str, value: float) -> None:
         history = target.setdefault(key, [])
@@ -932,13 +955,14 @@ def _update_country_trade_flows(
         if len(history) > 900:
             del history[:-900]
 
-    for asset in daten.aktien.values():
-        country = str(asset.get("land", ""))
+    for row, exposures in company_market_exposures:
+        asset = row.asset
+        country = row.country
         if country not in supply_by_country:
             continue
         capacity = max(1.0, float(asset.get("production_capacity", _company_capacity(asset))))
-        country_bonus = _country_sector_bonus(daten, country, str(asset.get("branche", "")))
-        for code, share in _cached_output_mix(asset).items():
+        country_bonus = _country_sector_bonus(daten, country, row.sector)
+        for code, share, _market in exposures:
             supply_by_country[country][code] += capacity * share * country_bonus
 
     for code in item_codes:
@@ -1175,6 +1199,16 @@ def _set_supply_demand(
         + max(0.0, 0.45 - stock_cover) * 0.035
     ) * profile["pressure_multiplier"]
     asset["price_pressure"] = _clamp((previous_price_pressure * 0.82) + (raw_pressure * 0.18), -0.18, 0.55)
+    previous_price_index = max(1.0, float(asset.get("price_index", asset.get("kurs", 100.0))))
+    index_return = _clamp(
+        (asset["price_pressure"] * 0.020)
+        + (asset["demand_change"] * 0.010)
+        - (asset["inventories_change"] * 0.005),
+        -0.020,
+        0.030,
+    )
+    asset["previous_price_index"] = previous_price_index
+    asset["price_index"] = max(1.0, previous_price_index * (1.0 + index_return))
     _append_metric_history(asset, "supply_history", supply, date_label)
     _append_metric_history(asset, "demand_history", demand, date_label)
     _append_metric_history(asset, "inventory_history", inventories, date_label)
@@ -1182,6 +1216,7 @@ def _set_supply_demand(
     _append_metric_history(asset, "surplus_history", surplus * 100.0, date_label)
     _append_metric_history(asset, "imbalance_history", (shortage - surplus) * 100.0, date_label)
     _append_metric_history(asset, "price_pressure_history", asset["price_pressure"] * 100.0, date_label)
+    _append_metric_history(asset, "price_index_history", asset["price_index"], date_label)
 
 
 def _smooth_real_economy_value(previous: float, target: float, *, shock_mode: bool) -> float:
@@ -1210,19 +1245,20 @@ def _update_company_utilization(
     date_label: str = "",
     opportunity_scores: dict[str, dict[str, float]] | None = None,
     company_rows=None,
+    company_market_exposures=None,
     *,
     record_history: bool = True,
     rebalance_outputs: bool = True,
 ) -> None:
-    for row in company_rows if company_rows is not None else company_runtimes(daten):
+    company_rows = company_rows if company_rows is not None else company_runtimes(daten)
+    company_market_exposures = company_market_exposures or _company_market_exposures(daten, company_rows)
+    for row, exposures in company_market_exposures:
         asset = row.asset
-        output_mix = _cached_output_mix(asset)
         weighted_utilization = 0.0
         weighted_shortage = 0.0
         weighted_input_availability = 0.0
         weighted_pricing_power = 0.0
-        for code, share in output_mix.items():
-            market = daten.rohstoffe.get(code) or daten.processed_products.get(code, {})
+        for _code, share, market in exposures:
             demand = max(1.0, float(market.get("demand", 100.0)))
             supply = max(1.0, float(market.get("supply", market.get("production", 100.0))))
             weighted_utilization += _clamp(demand / supply, 0.35, 1.25) * share
@@ -1264,29 +1300,71 @@ def _update_company_utilization(
             _rebalance_output_mix(asset, daten, opportunity_scores)
 
 
+def _company_market_exposures(daten: ModuleType, company_rows) -> list[tuple[object, tuple[tuple[str, float, dict], ...]]]:
+    """Cache invariant company/output/market links; market values stay live."""
+
+    stocks = getattr(daten, "aktien", {})
+    signature = (
+        tuple(stocks.keys()),
+        tuple(getattr(daten, "rohstoffe", {}).keys()),
+        tuple(getattr(daten, "processed_products", {}).keys()),
+    )
+    cache = getattr(daten, "_production_company_market_exposures", None)
+    if isinstance(cache, dict) and cache.get("signature") == signature:
+        return cache["rows"]
+    commodities = getattr(daten, "rohstoffe", {})
+    products = getattr(daten, "processed_products", {})
+    rows = [
+        (
+            row,
+            tuple(
+                (code, share, commodities.get(code) or products.get(code, {}))
+                for code, share in _cached_output_mix(row.asset).items()
+            ),
+        )
+        for row in company_rows
+    ]
+    daten._production_company_market_exposures = {"signature": signature, "rows": rows}
+    return rows
+
+
 def _record_company_quantity_history(asset: dict, date_label: str) -> None:
     capacity = max(1.0, float(asset.get("production_capacity", 0.0)))
-    output_mix = _cached_output_mix(asset)
+    output_plan, input_plan = _company_quantity_plan(asset)
     output_history = asset.setdefault("company_output_history", {})
-    input_requirements = defaultdict(float)
-    for code, share in output_mix.items():
+    for code, share in output_plan:
         company_qty = capacity * share
         history = output_history.setdefault(code, {}).setdefault("history", [])
         history.append((float(company_qty), date_label, ""))
         if len(history) > 900:
             del history[:-900]
-        definition = PROCESSED_PRODUCTS.get(code)
-        if not definition:
-            continue
-        required = company_qty / max(1, len(definition["inputs"]))
-        for input_code in definition["inputs"]:
-            input_requirements[_normalize_input(input_code)] += required
     input_history = asset.setdefault("company_input_history", {})
-    for code, required in input_requirements.items():
+    for code, capacity_share in input_plan:
+        required = capacity * capacity_share
         history = input_history.setdefault(code, {}).setdefault("history", [])
         history.append((float(required), date_label, ""))
         if len(history) > 900:
             del history[:-900]
+
+
+def _company_quantity_plan(asset: dict) -> tuple[tuple[tuple[str, float], ...], tuple[tuple[str, float], ...]]:
+    output_mix = _cached_output_mix(asset)
+    cached = asset.get("_company_quantity_plan")
+    if isinstance(cached, dict) and cached.get("source") is output_mix:
+        return cached["outputs"], cached["inputs"]
+    outputs = tuple(output_mix.items())
+    input_shares = defaultdict(float)
+    for code, share in outputs:
+        definition = PROCESSED_PRODUCTS.get(code)
+        if not definition:
+            continue
+        inputs = definition["inputs"]
+        input_share = share / max(1, len(inputs))
+        for input_code in inputs:
+            input_shares[_normalize_input(input_code)] += input_share
+    inputs = tuple(input_shares.items())
+    asset["_company_quantity_plan"] = {"source": output_mix, "outputs": outputs, "inputs": inputs}
+    return outputs, inputs
 
 
 def _balance_profile(code: str) -> dict[str, float]:
@@ -1436,9 +1514,11 @@ def _country_trade_capacity(daten: ModuleType, country: str, direction: str) -> 
     freight_factor = _clamp(1.0 - freight_shortage * 0.65, 0.45, 1.0)
     if direction == "import":
         dependency_drag = max(0.58, 1.0 - float(macro.get("import_dependency", 0.0)) * 0.35)
-        return _clamp(0.42 + rating_trust * 0.34 * freight_factor * dependency_drag, 0.25, 0.82)
+        base = _clamp(0.42 + rating_trust * 0.34 * freight_factor * dependency_drag, 0.25, 0.82)
+        return _clamp(base * shock_multiplier(daten, "trade", f"{country}:import"), 0.05, 1.0)
     export_strength = min(0.40, float(macro.get("export_strength", 0.0)) * 0.16)
-    return _clamp(0.46 + rating_trust * 0.28 * freight_factor + export_strength, 0.28, 0.88)
+    base = _clamp(0.46 + rating_trust * 0.28 * freight_factor + export_strength, 0.28, 0.88)
+    return _clamp(base * shock_multiplier(daten, "trade", f"{country}:export"), 0.05, 1.0)
 
 
 def _partner_base_weights(daten: ModuleType, countries: list[str]) -> dict[str, dict[str, float]]:

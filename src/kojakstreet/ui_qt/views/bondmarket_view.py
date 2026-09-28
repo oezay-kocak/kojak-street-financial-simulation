@@ -408,7 +408,7 @@ class BondMarketView(QFrame):
 
     def _bond_history(self, symbol: str) -> list:
         if self.history_provider is not None:
-            history = self.history_provider(symbol, 520)
+            history = self.history_provider(symbol, 1200)
             if history:
                 return history
         for bond in self.state.bond_market:

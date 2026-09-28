@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -18,8 +20,12 @@ PROJECT_ROOT = _project_root()
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QFrame,
     QHBoxLayout,
+    QLayout,
     QMainWindow,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -27,8 +33,11 @@ from PySide6.QtWidgets import (
 
 from kojakstreet.adapters.legacy_runtime import IntegratedRuntime
 from kojakstreet.adapters.legacy_state import snapshot_from_legacy
-from kojakstreet.core.financial_products import EXPIRING_DERIVATIVE_CONTRACT_TYPES, derivative_allows_future_trade
+from kojakstreet.core.financial_products import (
+    derivative_allows_future_trade,
+)
 from kojakstreet.core.state import GameState
+from kojakstreet.ui_qt.new_simulation import GenerationProgressDialog, NewSimulationDialog
 from kojakstreet.ui_qt.runtime_ports import RuntimePort, is_refreshable
 from kojakstreet.ui_qt.theme import APP_STYLESHEET
 from kojakstreet.ui_qt.views.bondmarket_view import BondMarketView
@@ -77,8 +86,32 @@ class SimulationWorker(QObject):
                 if state is None:
                     state = self.runtime.snapshot()
             self.finished.emit(state, steps)
-        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - worker boundary reports process failures to Qt
             self.failed.emit(str(exc))
+
+
+class WorkspaceScroll(QScrollArea):
+    """Fit the active page, with scrolling only when its minimum needs it."""
+    def __init__(self, stack):
+        super().__init__()
+        self.active = True
+        self.setWidget(stack)
+        stack.currentChanged.connect(self.fit_page)
+
+    def fit_page(self, *_args):
+        if not self.active:
+            return
+        stack = self.widget()
+        if stack is None:
+            return
+        minimum = stack.currentWidget().minimumSizeHint()
+        viewport = self.viewport().size()
+        stack.resize(max(viewport.width(), minimum.width()), max(viewport.height(), minimum.height()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_page()
+
 
 
 class KojakStreetWindow(QMainWindow):
@@ -113,11 +146,19 @@ class KojakStreetWindow(QMainWindow):
         self.queued_simulation_steps = 0
         self.queued_force_refresh = False
         self._last_live_current_version = -1
+        self._last_history_cache_version = int(getattr(runtime, "history_cache_version", 0))
         self._live_update_pending = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer_tick)
+        self.history_cache_timer = QTimer(self)
+        self.history_cache_timer.setInterval(100)
+        self.history_cache_timer.timeout.connect(self._apply_async_history_update)
+        if runtime is not None and hasattr(runtime, "history_cache_version"):
+            self.history_cache_timer.start()
         self.markets_view = MarketsView(state, self._execute_trade, self._asset_history_provider())
         self.stack = QStackedWidget()
+        self.stack.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self._closing = False
         self.views: dict[str, QWidget] = {"markets": self.markets_view}
         self._loaded_view_keys = {"markets"}
 
@@ -146,10 +187,13 @@ class KojakStreetWindow(QMainWindow):
                 view = self._build_view_placeholder(view_key)
                 self.views[view_key] = view
             self.stack.addWidget(view)
-        body.addWidget(self.stack, 1)
+        self.workspace_scroll = WorkspaceScroll(self.stack)
+        self.workspace_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body.addWidget(self.workspace_scroll, 1)
         root_layout.addLayout(body, 1)
 
         self.setCentralWidget(root)
+        self._connect_page_geometry(self.markets_view)
         self._update_status("markets")
 
     @property
@@ -171,7 +215,11 @@ class KojakStreetWindow(QMainWindow):
         if view_key != self.active_view_key and is_refreshable(view):
             self._refresh_view_widget(view, throttle_charts=bool(self.runtime and self.runtime.running))
         self.stack.setCurrentWidget(view)
+        self.stack.updateGeometry()
+        self.workspace_scroll.fit_page()
         self.active_view_key = view_key
+        for key, button in self.side_nav.buttons.items():
+            button.setChecked(key == view_key)
         self._update_status(view_key)
 
     def _update_status(self, view_key: str) -> None:
@@ -188,9 +236,6 @@ class KojakStreetWindow(QMainWindow):
             self.timer.start(self._timer_interval_ms())
         else:
             self.timer.stop()
-            if hasattr(self.runtime, "snapshot_for_view"):
-                self.state = self.runtime.snapshot_for_view(self.active_view_key)
-                self._refresh_active_view()
         self._update_status(self.active_view_key)
 
     def step_simulation(self) -> None:
@@ -201,24 +246,40 @@ class KojakStreetWindow(QMainWindow):
     def save_game(self) -> None:
         if self.runtime is None:
             return
-        self.runtime.save_game()
+        if self.simulation_busy:
+            return
+        try:
+            self.runtime.save_game()
+        except (OSError, ValueError, TypeError) as exc:
+            self.statusBar().showMessage(f"Save failed: {exc}")
+            return
         self.state = self.runtime.snapshot_for_view(self.active_view_key)
         self._refresh_active_view()
 
     def load_game(self) -> None:
         if self.runtime is None or not hasattr(self.runtime, "load_game"):
             return
-        self.runtime.load_game()
+        if self.simulation_busy:
+            return
+        try:
+            self.runtime.load_game()
+        except (OSError, ValueError, TypeError) as exc:
+            self.statusBar().showMessage(f"Load failed: {exc}")
+            return
+        self.top_bar.run_button.setChecked(False)
+        self.top_bar.run_button.setText("Run")
+        self.timer.stop()
         self.state = self.runtime.snapshot_for_view(self.active_view_key)
-        self._refresh_active_view()
+        self._refresh_active_view(preserve_live_history=False)
 
     def _execute_trade(self, ticker: str, mode: str, side: str, amount: float, leverage: int) -> None:
-        if self.runtime is None:
+        if self.runtime is None or self.simulation_busy:
             return
         try:
             if hasattr(self.runtime, "validate_trade"):
                 validation = self.runtime.validate_trade(ticker, mode, side, amount, leverage)
                 if not validation.is_valid:
+                    self.statusBar().showMessage(validation.message)
                     return
             if mode == "SPOT":
                 self.runtime.trade_spot(ticker, amount, side)
@@ -228,7 +289,8 @@ class KojakStreetWindow(QMainWindow):
                 self.runtime.trade_future(ticker, side, leverage, amount)
             else:
                 return
-        except ValueError:
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
             return
         self.state = self.runtime.snapshot_for_view(self.active_view_key)
         self._refresh_active_view()
@@ -236,28 +298,30 @@ class KojakStreetWindow(QMainWindow):
     def _allows_perpetual_trade(self, ticker: str) -> bool:
         if self.runtime is None:
             return False
-        state = self.runtime.state
+        state = getattr(self.runtime.state, "assets", self.runtime.state)
         if ticker in state.stocks or ticker in state.commodities or ticker in state.cryptos:
             return True
         derivative = state.derivatives.get(ticker)
         return bool(derivative and derivative_allows_future_trade(derivative))
 
     def _close_future(self, position_id: str) -> None:
-        if self.runtime is None:
+        if self.runtime is None or self.simulation_busy:
             return
         try:
             self.runtime.close_future(position_id)
-        except ValueError:
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
             return
         self.state = self.runtime.snapshot_for_view(self.active_view_key)
         self._refresh_active_view()
 
     def _exchange_currency(self, source_region: str, target_region: str, amount: float) -> None:
-        if self.runtime is None:
+        if self.runtime is None or self.simulation_busy:
             return
         try:
             self.runtime.exchange_currency(source_region, target_region, amount)
-        except ValueError:
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
             return
         self.state = self.runtime.snapshot_for_view(self.active_view_key)
         self._refresh_active_view()
@@ -297,6 +361,8 @@ class KojakStreetWindow(QMainWindow):
 
     @Slot(object, int)
     def _on_simulation_finished(self, state: GameState, steps: int) -> None:
+        if self._closing:
+            return
         self.pending_ticks += steps
         if self.force_refresh_after_worker:
             if self.runtime is not None and hasattr(self.runtime, "snapshot_for_view"):
@@ -317,6 +383,14 @@ class KojakStreetWindow(QMainWindow):
 
     @Slot(str)
     def _on_simulation_failed(self, message: str) -> None:
+        if self._closing:
+            return
+        if self.runtime is not None:
+            self.runtime.set_running(False)
+        self.timer.stop()
+        self.top_bar.run_button.setText("Run")
+        self.top_bar.run_button.setChecked(False)
+        self.statusBar().showMessage(f"Simulation stopped: {message}")
         self.force_refresh_after_worker = False
         self.simulation_busy = False
         self.top_bar.step_button.setEnabled(True)
@@ -327,6 +401,7 @@ class KojakStreetWindow(QMainWindow):
     @Slot()
     def _clear_simulation_worker(self) -> None:
         if self.simulation_thread is not None:
+            self.simulation_thread.setParent(None)
             self.simulation_thread.deleteLater()
         self.simulation_thread = None
         self.simulation_worker = None
@@ -342,14 +417,25 @@ class KojakStreetWindow(QMainWindow):
         return True
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._closing = True
+        self.workspace_scroll.active = False
+        self.timer.stop()
+        self.history_cache_timer.stop()
+        self.queued_simulation_steps = 0
         self._shutdown_simulation_worker()
+        if self.runtime is not None and hasattr(self.runtime, "close"):
+            self.runtime.close()
         super().closeEvent(event)
 
     def _shutdown_simulation_worker(self) -> None:
         if self.simulation_thread is None:
             return
+        if self.simulation_busy and self.runtime is not None and hasattr(self.runtime, "cancel_pending"):
+            self.runtime.cancel_pending()
         self.simulation_thread.quit()
-        self.simulation_thread.wait(1500)
+        if not self.simulation_thread.wait(5000):
+            self.simulation_thread.requestInterruption()
+            self.simulation_thread.wait(1000)
         self._clear_simulation_worker()
 
     def _timer_interval_ms(self) -> int:
@@ -357,7 +443,7 @@ class KojakStreetWindow(QMainWindow):
 
     def _apply_live_market_updates(self) -> None:
         self._live_update_pending = False
-        if self.runtime is None:
+        if self.runtime is None or self._closing or self.simulation_busy:
             return
         if hasattr(self.runtime, "current_version"):
             current_version = self.runtime.current_version()
@@ -368,15 +454,20 @@ class KojakStreetWindow(QMainWindow):
             self.top_bar.update_ticker_quotes(self.runtime.ticker_tape_quotes())
         active_view = self.views.get(self.active_view_key)
         changed_tables = None
+        live_date = None
         if hasattr(self.runtime, "current_delta"):
-            changed_tables = self.runtime.current_delta().tables
+            current_delta = self.runtime.current_delta()
+            changed_tables = current_delta.tables
+            live_date = current_delta.date_text
+            if live_date:
+                self.state.date = datetime.fromisoformat(live_date)
         if (
             self.active_view_key == "markets"
             and isinstance(active_view, MarketsView)
             and hasattr(self.runtime, "asset_quote_rows")
             and _current_table_changed(changed_tables, "asset_current")
         ):
-            active_view.apply_live_quotes(self.runtime.asset_quote_rows())
+            active_view.apply_live_quotes(self.runtime.asset_quote_rows(), date_text=live_date)
         elif (
             self.active_view_key == "supply_chain"
             and isinstance(active_view, SupplyChainView)
@@ -426,11 +517,24 @@ class KojakStreetWindow(QMainWindow):
         self._live_update_pending = True
         QTimer.singleShot(0, self._apply_live_market_updates)
 
-    def _refresh_active_view(self) -> None:
+    def _apply_async_history_update(self) -> None:
+        if self.runtime is None or self._closing:
+            return
+        history_version = int(getattr(self.runtime, "history_cache_version", 0))
+        if history_version == self._last_history_cache_version:
+            return
+        self._last_history_cache_version = history_version
+        self._refresh_active_view()
+
+    def _refresh_active_view(self, *, preserve_live_history: bool = True) -> None:
         active_view = self._ensure_view_loaded(self.active_view_key)
         throttle_charts = bool(self.runtime and self.runtime.running)
         if self.active_view_key == "markets" and isinstance(active_view, MarketsView):
-            active_view.refresh(self.state, throttle_charts=throttle_charts)
+            active_view.refresh(
+                self.state,
+                throttle_charts=throttle_charts,
+                preserve_live_history=preserve_live_history,
+            )
         elif is_refreshable(active_view):
             self._refresh_view_widget(active_view, throttle_charts=throttle_charts)
         else:
@@ -477,12 +581,17 @@ class KojakStreetWindow(QMainWindow):
         placeholder.setObjectName(f"{view_key}_placeholder")
         return placeholder
 
+    def _connect_page_geometry(self, view: QWidget) -> None:
+        for pages in view.findChildren(QStackedWidget):
+            pages.currentChanged.connect(self.workspace_scroll.fit_page)
+
     def _ensure_view_loaded(self, view_key: str) -> QWidget:
         if view_key in self._loaded_view_keys:
             return self.views[view_key]
         current = self.views.get(view_key)
         index = self.stack.indexOf(current) if current is not None else -1
         view = self._build_view(view_key)
+        self._connect_page_geometry(view)
         self.views[view_key] = view
         self._loaded_view_keys.add(view_key)
         if view_key == "markets":
@@ -516,7 +625,7 @@ class KojakStreetWindow(QMainWindow):
         if view_key == "macro":
             return MacroView(self.state, self._country_history_provider(), self._country_current_provider())
         if view_key == "global_macro":
-            return GlobalMacroView(self.state)
+            return GlobalMacroView(self.state, self._global_macro_history_provider())
         if view_key == "trade_map":
             return TradeMapView(self.state, self._country_trade_current_provider())
         if view_key == "news":
@@ -574,9 +683,16 @@ class KojakStreetWindow(QMainWindow):
         return self.runtime.forex_current_rows
 
     def _country_history_provider(self):
-        if self.runtime is None or not hasattr(self.runtime, "country_history"):
+        if self.runtime is None:
             return None
-        return self.runtime.country_history
+        if hasattr(self.runtime, "country_history_points"):
+            return self.runtime.country_history_points
+        return getattr(self.runtime, "country_history", None)
+
+    def _global_macro_history_provider(self):
+        if self.runtime is None or not hasattr(self.runtime, "global_macro_history"):
+            return None
+        return self.runtime.global_macro_history
 
     def _country_current_provider(self):
         if self.runtime is None or not hasattr(self.runtime, "country_current_rows"):
@@ -595,18 +711,70 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Create the application shell and exit without entering the Qt event loop.",
     )
+    parser.add_argument("--world-generator", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--live-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--project-root", type=Path, default=PROJECT_ROOT, help=argparse.SUPPRESS)
+    parser.add_argument("--output", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--data-dir", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--bootstrap", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--seed", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--years", type=int, choices=(50, 75, 100), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    if args.world_generator:
+        if args.output is None or args.seed is None or args.years is None:
+            parser.error("world generator requires --output, --seed and --years")
+        from kojakstreet.world_generator import _emit, generate
+
+        try:
+            generate(args.project_root.resolve(), args.output, args.seed, args.years)
+        except Exception as exc:  # noqa: BLE001 - isolated worker failure boundary
+            _emit("failed", error=str(exc))
+            return 1
+        return 0
+
+    if args.live_worker:
+        if args.data_dir is None or args.bootstrap is None:
+            parser.error("live worker requires --data-dir and --bootstrap")
+        from kojakstreet.live_worker import run
+
+        return run(args.project_root.resolve(), args.data_dir.resolve(), args.bootstrap.resolve())
 
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_STYLESHEET)
-    runtime = IntegratedRuntime(PROJECT_ROOT)
-    window = KojakStreetWindow(runtime.snapshot_for_view("markets"), runtime)
+    from PySide6.QtCore import QStandardPaths
+    data_dir = Path(os.environ.get("KOJAKSTREET_DATA_DIR", str(Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "KojakStreet")))
+    if args.smoke_test:
+        config = None
+    else:
+        chooser = NewSimulationDialog()
+        if chooser.exec() != QDialog.DialogCode.Accepted:
+            return 0
+        config = chooser.config()
+    if config is not None and config.mode.value == "ESTABLISHED":
+        progress = GenerationProgressDialog(config, PROJECT_ROOT, data_dir)
+        progress.start()
+        if progress.exec() != QDialog.DialogCode.Accepted:
+            return 0
+        runtime = IntegratedRuntime.open_world_bundle(PROJECT_ROOT, progress.bundle_path)
+    else:
+        runtime = IntegratedRuntime(PROJECT_ROOT, data_dir=data_dir, seed=config.seed if config is not None else None)
+    initial_state = runtime.snapshot_for_view("markets")
+    if not args.smoke_test:
+        from kojakstreet.live_process import LiveSimulationProcess
+
+        runtime = LiveSimulationProcess.from_runtime(runtime)
+    window = KojakStreetWindow(initial_state, runtime)
 
     if args.smoke_test:
+        window.close()
         return 0
 
     window.showMaximized()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        runtime.close()
 
 
 if __name__ == "__main__":

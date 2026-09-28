@@ -390,12 +390,17 @@ def _apply_government_issue_proceeds(daten_module, region: str, term_years: int)
     if not isinstance(macro, dict):
         return
     gdp = max(1.0, float(macro.get("bip_abs", 1.0)))
-    issue_size = gdp * min(0.028, 0.006 + term_years * 0.0008)
-    macro["government_debt"] = float(macro.get("government_debt", gdp * 0.62)) + issue_size
-    macro["sovereign_cash_buffer"] = float(macro.get("sovereign_cash_buffer", gdp * 0.015)) + issue_size * 0.94
-    macro["debt_to_gdp"] = macro["government_debt"] / gdp
-    macro["interest_burden"] = macro["government_debt"] * float(macro.get("zins", 0.035)) / gdp
-    macro["bond_funding_impulse"] = min(0.05, float(macro.get("bond_funding_impulse", 0.0)) + issue_size / gdp)
+    # Monthly fiscal accounting has already added the financed deficit to
+    # government_debt. Need-based bonds represent that borrowing in the market;
+    # adding their notional here would count the same funding a second time.
+    buffer = float(macro.get("sovereign_cash_buffer", gdp * 0.015))
+    buffer_target = gdp * 0.025
+    liquidity_addition = min(max(0.0, buffer_target - buffer), gdp * 0.004)
+    macro["sovereign_cash_buffer"] = buffer + liquidity_addition
+    macro["bond_funding_impulse"] = min(
+        0.05,
+        float(macro.get("bond_funding_impulse", 0.0)) + liquidity_addition / gdp,
+    )
 
 
 def _refresh_bond_quote(daten_module, bond: dict[str, Any]) -> None:
@@ -403,8 +408,13 @@ def _refresh_bond_quote(daten_module, bond: dict[str, Any]) -> None:
     maturity = _parse_date(bond.get("maturity_date"), today)
     years = max(0.05, (maturity - today).days / 365.0)
     region = str(bond.get("region", RESERVE_CURRENCY))
-    rating = str(bond.get("rating", DEFAULT_RATING))
     issuer_type = str(bond.get("issuer_type", "Corporate"))
+    if issuer_type == "Government":
+        rating = str(daten_module.makro.get(region, {}).get("rating", bond.get("rating", DEFAULT_RATING)))
+    else:
+        ticker = str(bond.get("ticker", ""))
+        rating = str(getattr(daten_module, "aktien", {}).get(ticker, {}).get("rating", bond.get("rating", DEFAULT_RATING)))
+    bond["rating"] = rating
     local_rate = float(daten_module.makro.get(region, {}).get("zins", 0.04))
     issuer_spread = 0.0 if issuer_type == "Government" else 0.012
     term_spread = min(0.020, years * 0.0012)

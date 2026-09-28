@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import tempfile
+import uuid
 from collections import defaultdict
 from collections.abc import Iterable
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from kojakstreet.core.data_store_schema import create_schema, migrate_schema
+from kojakstreet.core.history import (
+    DEFAULT_PIXEL_BUDGET,
+    ECONOMIC_MODEL_VERSION,
+    HISTORY_SCHEMA_VERSION,
+    MAX_PIXEL_BUDGET,
+    RAW_RETENTION_DAYS,
+    SemanticType,
+)
 from kojakstreet.core.runtime_context import SimulationDelta
 from kojakstreet.core.store_health import structured_store_health
 
@@ -45,10 +57,11 @@ class EconomicDataStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._connection = duckdb.connect(str(self.path))
-        except Exception:
+        except Exception:  # noqa: BLE001 - DuckDB exposes backend-specific open failures
             self._connection = duckdb.connect(":memory:")
             self.transient = True
         self._create_schema()
+        self._history_id = self._ensure_history_metadata()
         self.enabled = True
 
     def close(self) -> None:
@@ -56,6 +69,111 @@ class EconomicDataStore:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+
+    def reset_session(self) -> None:
+        """Drop analytics from the abandoned timeline when loading a checkpoint."""
+        self._pending_rows.clear()
+        self._pending_days.clear()
+        self._current_rows.clear()
+        self._current_dict_rows.clear()
+        self._session_rows.clear()
+        if self._connection is not None:
+            for (table,) in self._connection.execute("SHOW TABLES").fetchall():
+                if table == "history_metadata":
+                    continue
+                self._connection.execute(f'DELETE FROM "{_safe_identifier(table)}"')
+            self._connection.execute("DELETE FROM history_metadata WHERE key LIKE 'last_%_compaction'")
+
+    def checkpoint_session(self) -> dict:
+        # Durable history already lives in DuckDB. Embedding it again in JSON
+        # would make checkpoint size depend on world age.
+        return {"manifest": self.history_manifest(), "recent_rows": {}}
+
+    def restore_checkpoint_session(self, session: dict) -> None:
+        # V4 saves stored the two row lists directly.  V5-style checkpoints
+        # carry a manifest and only bounded recent rows.
+        self._pending_rows.clear()
+        self._pending_days.clear()
+        self._current_rows.clear()
+        self._current_dict_rows.clear()
+        self._session_rows.clear()
+        rows_by_table = session.get("recent_rows", session)
+        manifest = session.get("manifest")
+        if manifest:
+            self.bind_history_manifest(manifest)
+        for table in ("product_daily", "bond_daily"):
+            rows = rows_by_table.get(table, [])
+            self._session_rows[table] = list(rows)
+            self._pending_rows[table] = list(rows)
+            self._pending_days.update(str(row[0]) for row in rows)
+
+    def history_manifest(self) -> dict[str, object]:
+        latest = None
+        earliest = None
+        markers: dict[str, str] = {}
+        if self._connection is not None:
+            row = self._connection.execute("SELECT min(date), max(date) FROM asset_daily").fetchone()
+            aggregate = self._connection.execute("SELECT min(bucket_start), max(bucket_end) FROM history_aggregate").fetchone()
+            starts = [value for value in ((row or (None, None))[0], (aggregate or (None, None))[0]) if value is not None]
+            ends = [value for value in ((row or (None, None))[1], (aggregate or (None, None))[1]) if value is not None]
+            earliest = str(min(starts)) if starts else None
+            latest = str(max(ends)) if ends else None
+            markers = {str(key): str(value) for key, value in self._connection.execute("SELECT key, value FROM history_metadata WHERE key LIKE 'last_%_compaction'").fetchall()}
+        return {
+            "history_schema_version": HISTORY_SCHEMA_VERSION,
+            "economic_model_version": ECONOMIC_MODEL_VERSION,
+            "history_id": self._history_id,
+            "store_name": self.path.name,
+            "earliest_date": earliest,
+            "latest_date": latest,
+            "completed_buckets": markers,
+        }
+
+    def bind_history_manifest(self, manifest: dict[str, object]) -> None:
+        expected = str(manifest.get("history_id", ""))
+        if expected and expected != self._history_id:
+            raise ValueError("Savegame history ID does not match this analytical store")
+        if int(manifest.get("history_schema_version", HISTORY_SCHEMA_VERSION)) != HISTORY_SCHEMA_VERSION:
+            raise ValueError("Unsupported history schema version")
+        if str(manifest.get("economic_model_version", ECONOMIC_MODEL_VERSION)) != ECONOMIC_MODEL_VERSION:
+            raise ValueError("Savegame economic model version does not match this runtime")
+
+    def seed_history_aggregates(
+        self,
+        rows: Iterable[tuple[Any, ...]],
+        *,
+        last_yearly: date | None = None,
+        last_monthly: date | None = None,
+    ) -> None:
+        """Insert deterministic prehistory buckets produced outside the daily engine."""
+        if not self.enabled or self._connection is None:
+            return
+        materialized = list(rows)
+        temporary_path: Path | None = None
+        if materialized:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    newline="",
+                    suffix=".csv",
+                    delete=False,
+                ) as stream:
+                    temporary_path = Path(stream.name)
+                    csv.writer(stream).writerows(materialized)
+                quoted_path = str(temporary_path).replace("'", "''")
+                self._connection.execute(
+                    f"COPY history_aggregate FROM '{quoted_path}' (FORMAT CSV, HEADER FALSE)"
+                )
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
+        for resolution, marker in (("yearly", last_yearly), ("monthly", last_monthly)):
+            if marker is None:
+                continue
+            key = f"last_{resolution}_compaction"
+            self._connection.execute("DELETE FROM history_metadata WHERE key=?", [key])
+            self._connection.execute("INSERT INTO history_metadata VALUES (?, ?)", [key, marker.isoformat()])
 
     def current_version(self) -> int:
         """Return a monotonically increasing version for the in-memory current tables."""
@@ -79,6 +197,9 @@ class EconomicDataStore:
         if date_text in self._pending_days:
             self._drop_pending_date(date_text)
         self._pending_days.add(date_text)
+        for table, rows in self._session_rows.items():
+            if rows and str(rows[-1][0]) == date_text:
+                self._session_rows[table] = [row for row in rows if str(row[0]) != date_text]
         report_scope = current_scope == "full" or _is_macro_report_day(record_date)
         asset_rows = self._asset_rows(daten_module, date_text)
         product_rows = self._product_rows(daten_module, date_text)
@@ -153,6 +274,7 @@ class EconomicDataStore:
         self._pending_rows["asset_daily"].extend(asset_rows)
         self._pending_rows["product_daily"].extend(product_rows)
         self._session_rows["product_daily"].extend(product_rows)
+        self._trim_session_rows("product_daily")
         self._pending_rows["global_macro_daily"].extend(global_macro_rows)
         self._pending_rows["forex_daily"].extend(forex_rows)
         self._pending_rows["phase_metric_daily"].extend(phase_metric_rows)
@@ -178,16 +300,17 @@ class EconomicDataStore:
                 "news_current": news_rows,
                 "event_current": event_rows,
                 "phase_metric_current": phase_metric_rows,
-            }
+        }
         if self._should_record_bonds(daten_module):
-            bond_rows = self._bond_rows(daten_module, date_text)
-            if "bond_current" not in self._current_rows or not _same_current_rows(self._current_rows.get("bond_current", []), bond_rows):
+            bond_current_rows, bond_rows = self._bond_row_sets(daten_module, date_text)
+            if "bond_current" not in self._current_rows or not _same_current_rows(self._current_rows.get("bond_current", []), bond_current_rows):
                 changed_tables.add("bond_current")
-            self._current_rows["bond_current"] = bond_rows
+            self._current_rows["bond_current"] = bond_current_rows
             self._pending_rows["bond_daily"].extend(bond_rows)
             self._session_rows["bond_daily"].extend(bond_rows)
+            self._trim_session_rows("bond_daily")
             if current_tables:
-                current_tables["bond_current"] = bond_rows
+                current_tables["bond_current"] = bond_current_rows
         self._current_dict_rows.clear()
         self._current_version += 1
         self._current_delta = SimulationDelta(
@@ -213,6 +336,10 @@ class EconomicDataStore:
         try:
             for table, rows in list(self._pending_rows.items()):
                 self._replace_buffered_rows(table, rows)
+            self._upsert_structural_events(self._pending_rows.get("event_log", []))
+            self._compact_completed_history()
+            for table, rows in self._current_rows.items():
+                self._replace_current_rows(table, rows)
             connection.execute("COMMIT")
             committed = True
         except Exception:
@@ -222,6 +349,90 @@ class EconomicDataStore:
             if committed:
                 self._pending_rows.clear()
                 self._pending_days.clear()
+
+    def history_series(
+        self,
+        table: str,
+        key_column: str,
+        key: str,
+        value_column: str,
+        *,
+        from_date: date | datetime | str | None = None,
+        to_date: date | datetime | str | None = None,
+        pixel_budget: int = DEFAULT_PIXEL_BUDGET,
+        semantic_type: SemanticType | str = SemanticType.LEVEL,
+    ) -> list[dict[str, object]]:
+        """Return a bounded series spanning the requested available history."""
+
+        if not self.enabled or self._connection is None:
+            return []
+        if self._pending_rows:
+            self.flush()
+        budget = max(2, min(MAX_PIXEL_BUDGET, int(pixel_budget)))
+        semantic = SemanticType(str(semantic_type))
+        entity = _history_entity(table, key_column, key)
+        query_key = str(key).split(":", 1)[1] if table == "asset_daily" and ":" in str(key) else key
+        bounds = self._connection.execute(
+            f"SELECT min(date), max(date) FROM {_safe_identifier(table)} WHERE {_safe_identifier(key_column)} = ?",
+            [query_key],
+        ).fetchone()
+        aggregate_bounds = self._connection.execute(
+            "SELECT min(bucket_start), max(bucket_end) FROM history_aggregate WHERE source_table=? AND entity=? AND field=?",
+            [table, entity, value_column],
+        ).fetchone()
+        starts = [item for item in ((bounds or (None, None))[0], (aggregate_bounds or (None, None))[0]) if item is not None]
+        ends = [item for item in ((bounds or (None, None))[1], (aggregate_bounds or (None, None))[1]) if item is not None]
+        if not starts or not ends:
+            return []
+        start = _coerce_date(from_date) if from_date is not None else min(starts)
+        end = _coerce_date(to_date) if to_date is not None else max(ends)
+        span_days = max(1, (end - start).days + 1)
+        resolution = "raw" if span_days <= budget and span_days <= RAW_RETENTION_DAYS else ("monthly" if span_days <= budget * 31 else "yearly")
+        if resolution == "monthly":
+            available = self._connection.execute(
+                "SELECT count(*) FROM history_aggregate WHERE source_table=? AND entity=? AND field=? AND semantic_type=? AND resolution='monthly'",
+                [table, entity, value_column, semantic.value],
+            ).fetchone()[0]
+            if not available:
+                resolution = "yearly"
+        if resolution == "raw":
+            rows = self._connection.execute(
+                f"SELECT date, {_safe_identifier(value_column)} FROM {_safe_identifier(table)} WHERE {_safe_identifier(key_column)}=? AND date BETWEEN ? AND ? ORDER BY date",
+                [query_key, start, end],
+            ).fetchall()
+            result = [{"date": str(day), "value": float(value), "open": float(value), "high": float(value), "low": float(value), "close": float(value), "resolution": "raw"} for day, value in rows if value is not None]
+        else:
+            value_expr = "sum_value" if semantic is SemanticType.FLOW else ("mean_value" if semantic is SemanticType.RATE else "close_value")
+            rows = self._connection.execute(
+                f"SELECT bucket_start, bucket_end, open_value, high_value, low_value, close_value, {value_expr} FROM history_aggregate WHERE source_table=? AND entity=? AND field=? AND semantic_type=? AND resolution=? AND bucket_end>=? AND bucket_start<=? ORDER BY bucket_start",
+                [table, entity, value_column, semantic.value, resolution, start, end],
+            ).fetchall()
+            result = [
+                {"date": str(bucket_end), "start": str(bucket_start), "value": float(value), "open": float(open_v), "high": float(high_v), "low": float(low_v), "close": float(close_v), "resolution": resolution}
+                for bucket_start, bucket_end, open_v, high_v, low_v, close_v, value in rows
+            ]
+            if resolution == "monthly" and rows:
+                first_monthly = _coerce_date(rows[0][0])
+                yearly_rows = self._connection.execute(
+                    f"SELECT bucket_start, bucket_end, open_value, high_value, low_value, close_value, {value_expr} FROM history_aggregate WHERE source_table=? AND entity=? AND field=? AND semantic_type=? AND resolution='yearly' AND bucket_end>=? AND bucket_end<? ORDER BY bucket_start",
+                    [table, entity, value_column, semantic.value, start, first_monthly],
+                ).fetchall()
+                yearly_prefix = [
+                    {"date": str(bucket_end), "start": str(bucket_start), "value": float(value), "open": float(open_v), "high": float(high_v), "low": float(low_v), "close": float(close_v), "resolution": "yearly"}
+                    for bucket_start, bucket_end, open_v, high_v, low_v, close_v, value in yearly_rows
+                ]
+                result = yearly_prefix + result
+            # Keep a dense recent tail so 1M/6M/1Y remain high resolution even
+            # when the same payload also represents centuries in ALL/MAX.
+            raw_tail_start = max(start, end - timedelta(days=519))
+            tail = self._connection.execute(
+                f"SELECT date, {_safe_identifier(value_column)} FROM {_safe_identifier(table)} WHERE {_safe_identifier(key_column)}=? AND date>=? AND date<=? ORDER BY date",
+                [query_key, raw_tail_start, end],
+            ).fetchall()
+            if tail:
+                result = [point for point in result if _coerce_date(point["date"]) < raw_tail_start]
+            result.extend({"date": str(day), "value": float(value), "open": float(value), "high": float(value), "low": float(value), "close": float(value), "resolution": "raw"} for day, value in tail if value is not None)
+        return _bounded_points(result, budget)
 
     def recent_series(self, table: str, key_column: str, key: str, value_column: str, limit: int = 520) -> list[float]:
         """Return a recent numeric series ordered from oldest to newest."""
@@ -490,6 +701,18 @@ class EconomicDataStore:
         ).fetchall()
         return [_event_row_dict((None, *row)) for row in rows]
 
+    def structural_events(self, *, limit: int = 2000) -> list[dict[str, object]]:
+        if not self.enabled or self._connection is None:
+            return []
+        rows = self._connection.execute(
+            "SELECT event_id, date, event_type, scope, entity, summary, severity, metadata_json FROM structural_event ORDER BY date, event_id LIMIT ?",
+            [max(1, min(10000, int(limit)))],
+        ).fetchall()
+        return [
+            {"event_id": str(event_id), "date": str(day), "event_type": str(event_type), "scope": str(scope), "entity": str(entity), "summary": str(summary), "severity": str(severity), "metadata": json.loads(metadata or "{}")}
+            for event_id, day, event_type, scope, entity, summary, severity, metadata in rows
+        ]
+
     def news_current_rows(self) -> list[dict[str, object]]:
         cached = self._current_rows.get("news_current", [])
         if cached:
@@ -668,249 +891,105 @@ class EconomicDataStore:
     def _create_schema(self) -> None:
         assert self._connection is not None
         create_schema(self._connection)
-        return
+
+    def _ensure_history_metadata(self) -> str:
+        assert self._connection is not None
+        existing = self._connection.execute("SELECT value FROM history_metadata WHERE key='history_id'").fetchone()
+        history_id = str(existing[0]) if existing else str(uuid.uuid4())
+        values = {
+            "history_id": history_id,
+            "history_schema_version": str(HISTORY_SCHEMA_VERSION),
+            "economic_model_version": ECONOMIC_MODEL_VERSION,
+        }
+        for key, value in values.items():
+            self._connection.execute("DELETE FROM history_metadata WHERE key=?", [key])
+            self._connection.execute("INSERT INTO history_metadata VALUES (?, ?)", [key, value])
+        return history_id
+
+    def _trim_session_rows(self, table: str) -> None:
+        rows = self._session_rows.get(table, [])
+        dates = sorted({str(row[0]) for row in rows})
+        if len(dates) <= 520:
+            return
+        keep = set(dates[-520:])
+        self._session_rows[table] = [row for row in rows if str(row[0]) in keep]
+
+    def _compact_completed_history(self) -> None:
+        assert self._connection is not None
+        row = self._connection.execute("SELECT max(date) FROM asset_daily").fetchone()
+        if not row or row[0] is None:
+            return
+        reference = _coerce_date(row[0])
+        completed_month = date(reference.year, reference.month, 1) - timedelta(days=1)
+        completed_year = date(reference.year - 1, 12, 31)
+        for resolution, completed in (
+            ("monthly", completed_month),
+            ("yearly", completed_year),
+        ):
+            if completed.year < 1:
+                continue
+            marker_key = f"last_{resolution}_compaction"
+            marker_row = self._connection.execute("SELECT value FROM history_metadata WHERE key=?", [marker_key]).fetchone()
+            since = _coerce_date(marker_row[0]) if marker_row else None
+            if since is not None and since >= completed:
+                continue
+            specs = _HISTORY_SPECS + (_YEARLY_ONLY_SPECS if resolution == "yearly" else [])
+            for spec in specs:
+                self._aggregate_spec(spec, resolution, completed, since)
+            self._connection.execute("DELETE FROM history_metadata WHERE key=?", [marker_key])
+            self._connection.execute("INSERT INTO history_metadata VALUES (?, ?)", [marker_key, completed.isoformat()])
+        raw_cutoff = reference - timedelta(days=RAW_RETENTION_DAYS)
+        raw_tables = {spec[0] for spec in (*_HISTORY_SPECS, *_YEARLY_ONLY_SPECS)} | {
+            "company_output_daily", "fund_allocation_daily", "news_events", "event_log", "phase_metric_daily"
+        }
+        for table in raw_tables:
+            self._connection.execute(f"DELETE FROM {_safe_identifier(table)} WHERE date < ?", [raw_cutoff])
+        monthly_cutoff = date(max(1, reference.year - 20), 1, 1)
         self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS asset_daily (
-                date DATE,
-                ticker VARCHAR,
-                asset_type VARCHAR,
-                name VARCHAR,
-                region VARCHAR,
-                sector VARCHAR,
-                price DOUBLE,
-                change_pct DOUBLE,
-                market_cap DOUBLE,
-                revenue DOUBLE,
-                free_cash_flow DOUBLE,
-                rating VARCHAR
-            )
-            """
+            "DELETE FROM history_aggregate WHERE resolution='monthly' AND bucket_end < ?",
+            [monthly_cutoff],
         )
+
+    def _aggregate_spec(self, spec: tuple[str, str, str, str], resolution: str, completed: date, since: date | None) -> None:
+        assert self._connection is not None
+        table, entity_expression, field, semantic = spec
+        safe_table = _safe_identifier(table)
+        safe_field = _safe_identifier(field)
+        bucket_start = "date_trunc('month', date)::DATE" if resolution == "monthly" else "make_date(year(date), 1, 1)"
+        bucket_end = "last_day(date)" if resolution == "monthly" else "make_date(year(date), 12, 31)"
+        lower_bound = since or date(1, 1, 1)
+        sum_expression = f"sum({safe_field})" if semantic == SemanticType.FLOW.value else "0.0"
         self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS product_daily (
-                date DATE,
-                code VARCHAR,
-                item_type VARCHAR,
-                name VARCHAR,
-                category VARCHAR,
-                produced DOUBLE,
-                demanded DOUBLE,
-                inventories DOUBLE,
-                shortage DOUBLE,
-                pressure DOUBLE,
-                price DOUBLE
-            )
-            """
+            f"""
+            INSERT INTO history_aggregate
+            SELECT ?, CAST({entity_expression} AS VARCHAR) AS entity, ?, ?, ?,
+                   {bucket_start} AS bucket_start, {bucket_end} AS bucket_end,
+                   arg_min({safe_field}, date), max({safe_field}), min({safe_field}), arg_max({safe_field}, date),
+                   avg({safe_field}), {sum_expression}, count({safe_field})
+            FROM {safe_table}
+            WHERE date <= ? AND date > ? AND {safe_field} IS NOT NULL
+            GROUP BY bucket_start, bucket_end, entity
+            """,
+            [table, field, semantic, resolution, completed, lower_bound],
         )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS country_daily (
-                date DATE,
-                region VARCHAR,
-                population DOUBLE,
-                gdp DOUBLE,
-                growth DOUBLE,
-                rate DOUBLE,
-                inflation DOUBLE,
-                unemployment DOUBLE,
-                rating VARCHAR,
-                trade_balance DOUBLE,
-                import_dependency DOUBLE,
-                export_strength DOUBLE,
-                main_sector VARCHAR,
-                main_bottleneck VARCHAR,
-                debt_to_gdp DOUBLE,
-                credit_growth DOUBLE,
-                expected_growth DOUBLE,
-                expected_inflation DOUBLE,
-                expected_rate DOUBLE,
-                macro_surprise DOUBLE,
-                balance_sheet DOUBLE
+
+    def _upsert_structural_events(self, rows: list[tuple[Any, ...]]) -> None:
+        assert self._connection is not None
+        durable_types = {"default", "new_company", "crypto_shutdown", "central_bank", "rating_migration", "distress", "recovery"}
+        for day, event_type, scope, entity, summary, severity in rows:
+            if str(event_type) not in durable_types:
+                continue
+            identity = "|".join(map(str, (day, event_type, scope, entity, summary)))
+            event_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+            self._connection.execute("DELETE FROM structural_event WHERE event_id=?", [event_id])
+            self._connection.execute(
+                "INSERT INTO structural_event VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [event_id, day, event_type, scope, entity, summary, severity, json.dumps({}, separators=(",", ":"))],
             )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS company_daily (
-                date DATE,
-                ticker VARCHAR,
-                name VARCHAR,
-                region VARCHAR,
-                sector VARCHAR,
-                rating VARCHAR,
-                price DOUBLE,
-                market_cap DOUBLE,
-                revenue DOUBLE,
-                free_cash_flow DOUBLE,
-                production_capacity DOUBLE,
-                capacity_utilization DOUBLE,
-                production_score DOUBLE,
-                input_availability DOUBLE,
-                supply_chain_shortage DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS company_output_daily (
-                date DATE,
-                ticker VARCHAR,
-                role VARCHAR,
-                code VARCHAR,
-                share DOUBLE,
-                quantity DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS country_trade_daily (
-                date DATE,
-                region VARCHAR,
-                code VARCHAR,
-                produced DOUBLE,
-                demanded DOUBLE,
-                exports DOUBLE,
-                imports DOUBLE,
-                net DOUBLE,
-                shortage DOUBLE,
-                pressure DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS fund_allocation_daily (
-                date DATE,
-                fund_ticker VARCHAR,
-                ticker VARCHAR,
-                asset_type VARCHAR,
-                weight DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS global_macro_daily (
-                date DATE,
-                metric VARCHAR,
-                value DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS forex_daily (
-                date DATE,
-                pair VARCHAR,
-                base VARCHAR,
-                quote VARCHAR,
-                rate DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bond_daily (
-                date DATE,
-                symbol VARCHAR,
-                issuer VARCHAR,
-                region VARCHAR,
-                bond_type VARCHAR,
-                price DOUBLE,
-                yield DOUBLE,
-                coupon DOUBLE,
-                maturity_years DOUBLE,
-                rating VARCHAR,
-                issuer_type VARCHAR,
-                category VARCHAR,
-                default_risk DOUBLE,
-                liquidity DOUBLE,
-                maturity_date VARCHAR,
-                change_pct DOUBLE,
-                duration DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS portfolio_daily (
-                date DATE,
-                cash DOUBLE,
-                net_worth DOUBLE,
-                positions INTEGER,
-                futures INTEGER
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS news_events (
-                date DATE,
-                body VARCHAR,
-                category VARCHAR
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS event_log (
-                date DATE,
-                event_type VARCHAR,
-                scope VARCHAR,
-                entity VARCHAR,
-                summary VARCHAR,
-                severity VARCHAR
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS phase_metric_daily (
-                date DATE,
-                phase VARCHAR,
-                duration_ms DOUBLE
-            )
-            """
-        )
-        self._connection.execute("CREATE TABLE IF NOT EXISTS asset_current AS SELECT * FROM asset_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS product_current AS SELECT * FROM product_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS company_current AS SELECT * FROM company_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS company_output_current AS SELECT * FROM company_output_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS country_trade_current AS SELECT * FROM country_trade_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS fund_allocation_current AS SELECT * FROM fund_allocation_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS country_current AS SELECT * FROM country_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS global_macro_current AS SELECT * FROM global_macro_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS forex_current AS SELECT * FROM forex_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS bond_current AS SELECT * FROM bond_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS portfolio_current AS SELECT * FROM portfolio_daily WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS news_current AS SELECT * FROM news_events WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS event_current AS SELECT * FROM event_log WHERE FALSE")
-        self._connection.execute("CREATE TABLE IF NOT EXISTS phase_metric_current AS SELECT * FROM phase_metric_daily WHERE FALSE")
-        self._migrate_schema()
 
     def _migrate_schema(self) -> None:
         assert self._connection is not None
         migrate_schema(self._connection)
-        return
-        for table in ("bond_daily", "bond_current"):
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS issuer_type VARCHAR")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS category VARCHAR")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS default_risk DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS liquidity DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS maturity_date VARCHAR")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS change_pct DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS duration DOUBLE")
-        for table in ("country_daily", "country_current"):
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS debt_to_gdp DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS credit_growth DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS expected_growth DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS expected_inflation DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS expected_rate DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS macro_surprise DOUBLE")
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS balance_sheet DOUBLE")
 
     def _replace_rows(self, table: str, date_text: str, rows: list[tuple[Any, ...]]) -> None:
         assert self._connection is not None
@@ -1023,7 +1102,7 @@ class EconomicDataStore:
                     _float(data.get("inventories", 0.0)),
                     _float(data.get("shortage", 0.0)),
                     _float(data.get("price_pressure", 0.0)),
-                    _float(data.get("kurs", 0.0)),
+                    _float(data.get("kurs", data.get("price_index", 0.0))),
                 )
             )
         return rows
@@ -1157,40 +1236,51 @@ class EconomicDataStore:
             rows.append((date_text, pair, base, quote, rate))
         return rows
 
-    def _bond_rows(self, daten_module, date_text: str) -> list[tuple[Any, ...]]:
-        rows = []
+    def _bond_rows(self, daten_module, date_text: str, *, only_updated: bool = False) -> list[tuple[Any, ...]]:
+        current_rows, updated_rows = self._bond_row_sets(daten_module, date_text)
+        return updated_rows if only_updated else current_rows
+
+    def _bond_row_sets(
+        self,
+        daten_module,
+        date_text: str,
+    ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+        current_rows = []
+        updated_rows = []
+        record_ordinal = _coerce_date(date_text).toordinal()
         for bond in getattr(daten_module, "bond_market", []):
             issuer_type = str(bond.get("issuer_type", bond.get("typ", bond.get("bond_type", ""))))
             category = str(bond.get("category", issuer_type))
-            rows.append(
-                (
-                    date_text,
-                    str(bond.get("symbol", bond.get("ticker", ""))),
-                    str(bond.get("issuer", bond.get("ticker", ""))),
-                    str(bond.get("land", bond.get("region", ""))),
-                    issuer_type,
-                    _float(bond.get("price", bond.get("kurs", 0.0))),
-                    _float(bond.get("yield_to_maturity", bond.get("yield", bond.get("rendite", 0.0)))),
-                    _float(bond.get("coupon", bond.get("zins", 0.0))),
-                    _float(bond.get("maturity_years", bond.get("term_years", bond.get("laufzeit", 0.0)))),
-                    str(bond.get("rating", "")),
-                    issuer_type,
-                    category,
-                    _float(bond.get("default_risk", 0.0)),
-                    _float(bond.get("liquidity", 0.0)),
-                    _date_text(bond.get("maturity_date", "")),
-                    _float(bond.get("aenderung", 0.0)),
-                    _float(bond.get("duration", 0.0)),
-                )
+            row = (
+                date_text,
+                str(bond.get("symbol", bond.get("ticker", ""))),
+                str(bond.get("issuer", bond.get("ticker", ""))),
+                str(bond.get("land", bond.get("region", ""))),
+                issuer_type,
+                _float(bond.get("price", bond.get("kurs", 0.0))),
+                _float(bond.get("yield_to_maturity", bond.get("yield", bond.get("rendite", 0.0)))),
+                _float(bond.get("coupon", bond.get("zins", 0.0))),
+                _float(bond.get("maturity_years", bond.get("term_years", bond.get("laufzeit", 0.0)))),
+                str(bond.get("rating", "")),
+                issuer_type,
+                category,
+                _float(bond.get("default_risk", 0.0)),
+                _float(bond.get("liquidity", 0.0)),
+                _date_text(bond.get("maturity_date", "")),
+                _float(bond.get("aenderung", 0.0)),
+                _float(bond.get("duration", 0.0)),
             )
-        return rows
+            current_rows.append(row)
+            if int(bond.get("last_price_update_ordinal", -1) or -1) == record_ordinal:
+                updated_rows.append(row)
+        return current_rows, updated_rows
 
     def _should_record_bonds(self, daten_module) -> bool:
-        current_date = getattr(daten_module, "datum", None)
-        if not hasattr(current_date, "toordinal"):
+        record_date = getattr(daten_module, "last_completed_simulation_date", getattr(daten_module, "datum", None))
+        if not hasattr(record_date, "toordinal"):
             return True
         last_update = getattr(daten_module, "last_bond_market_update_ordinal", None)
-        return last_update is None or int(last_update) == current_date.toordinal()
+        return last_update is None or int(last_update) == record_date.toordinal()
 
     def _portfolio_rows(self, daten_module, date_text: str) -> list[tuple[Any, ...]]:
         net_worth = _last_history_value(getattr(daten_module, "DEPOT_VERMOEGEN_HISTORIE", []))
@@ -1521,6 +1611,12 @@ def _event_type(text: str) -> str:
         return "new_company"
     if "CRYPTO SHUTDOWN" in upper:
         return "crypto_shutdown"
+    if "RATING" in upper and any(token in upper for token in ("UPGRADE", "DOWNGRADE", "MIGRATION")):
+        return "rating_migration"
+    if "DISTRESS" in upper:
+        return "distress"
+    if "RECOVER" in upper:
+        return "recovery"
     if "CAPACITY TREND" in upper:
         return "capacity_trend"
     if "SECTOR MOMENTUM" in upper:
@@ -1538,7 +1634,7 @@ def _event_scope(text: str) -> str:
     event_type = _event_type(text)
     if event_type in {"country_trade", "central_bank"}:
         return "country"
-    if event_type in {"new_company", "default", "capacity_trend", "sector_momentum"}:
+    if event_type in {"new_company", "default", "capacity_trend", "sector_momentum", "rating_migration", "distress", "recovery"}:
         return "company"
     if event_type == "crypto_shutdown":
         return "crypto"
@@ -1581,6 +1677,101 @@ def _safe_identifier(value: str) -> str:
     if not value.replace("_", "").isalnum():
         raise ValueError(f"Unsafe SQL identifier: {value}")
     return value
+
+
+def _specs(table: str, entity_expression: str, fields: dict[str, SemanticType]) -> list[tuple[str, str, str, str]]:
+    return [(table, entity_expression, field, semantic.value) for field, semantic in fields.items()]
+
+
+_HISTORY_SPECS = [
+    *_specs("asset_daily", "asset_type || ':' || ticker", {
+        "price": SemanticType.PRICE,
+    }),
+    *_specs("product_daily", "code", {
+        "produced": SemanticType.LEVEL,
+        "demanded": SemanticType.LEVEL,
+        "inventories": SemanticType.LEVEL,
+        "shortage": SemanticType.RATE,
+        "pressure": SemanticType.RATE,
+        "price": SemanticType.PRICE,
+    }),
+    *_specs("country_daily", "region", {
+        "population": SemanticType.LEVEL,
+        "gdp": SemanticType.LEVEL,
+        "growth": SemanticType.RATE,
+        "rate": SemanticType.RATE,
+        "inflation": SemanticType.RATE,
+        "unemployment": SemanticType.RATE,
+        "trade_balance": SemanticType.LEVEL,
+        "import_dependency": SemanticType.RATE,
+        "export_strength": SemanticType.RATE,
+        "debt_to_gdp": SemanticType.RATE,
+        "credit_growth": SemanticType.RATE,
+        "balance_sheet": SemanticType.LEVEL,
+    }),
+    *_specs("company_daily", "ticker", {
+        "price": SemanticType.PRICE,
+        "market_cap": SemanticType.LEVEL,
+        "revenue": SemanticType.LEVEL,
+        "free_cash_flow": SemanticType.LEVEL,
+    }),
+    # Global macro contains both stock/level values (M2, balance sheets,
+    # liquidity) and rates. Keeping both cheap aggregate interpretations lets
+    # each provider request the financially correct semantic at read time.
+    *_specs("global_macro_daily", "metric", {"value": SemanticType.RATE}),
+    *_specs("global_macro_daily", "metric", {"value": SemanticType.LEVEL}),
+    *_specs("forex_daily", "pair", {"rate": SemanticType.PRICE}),
+    *_specs("bond_daily", "symbol", {
+        "price": SemanticType.PRICE,
+        "yield": SemanticType.RATE,
+        "default_risk": SemanticType.RATE,
+        "liquidity": SemanticType.RATE,
+        "duration": SemanticType.LEVEL,
+    }),
+    *_specs("portfolio_daily", "'WORLD'", {"cash": SemanticType.LEVEL, "net_worth": SemanticType.LEVEL}),
+]
+
+_YEARLY_ONLY_SPECS = [
+    *_specs("country_trade_daily", "region || ':' || code", {
+        "produced": SemanticType.LEVEL,
+        "demanded": SemanticType.LEVEL,
+        "exports": SemanticType.LEVEL,
+        "imports": SemanticType.LEVEL,
+        "net": SemanticType.LEVEL,
+        "shortage": SemanticType.RATE,
+        "pressure": SemanticType.RATE,
+    }),
+]
+
+
+def _history_entity(table: str, key_column: str, key: str) -> str:
+    if table == "asset_daily" and key_column == "ticker":
+        # Callers that need exact disambiguation should pass ``AssetType:TICKER``.
+        return str(key) if ":" in str(key) else f"Stock:{key}"
+    return str(key)
+
+
+def _coerce_date(value: date | datetime | str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value)
+    if len(text) == 10 and text[2] == "." and text[5] == ".":
+        day, month, year = (int(part) for part in text.split("."))
+        return date(year, month, day)
+    return date.fromisoformat(text[:10])
+
+
+def _bounded_points(points: list[dict[str, object]], budget: int) -> list[dict[str, object]]:
+    if len(points) <= budget:
+        return points
+    if budget <= 2:
+        return [points[0], points[-1]]
+    indexes = {0, len(points) - 1}
+    scale = (len(points) - 1) / (budget - 1)
+    indexes.update(round(index * scale) for index in range(1, budget - 1))
+    return [points[index] for index in sorted(indexes)]
 
 
 _COLUMN_INDEXES = {

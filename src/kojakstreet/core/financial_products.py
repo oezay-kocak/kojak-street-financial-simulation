@@ -71,6 +71,8 @@ def derivative_pricing_note(asset: dict[str, Any]) -> str:
             "Displayed price is a scaled protection-value indicator, not an equity-style quote "
             f"(notional {notional:,.0f}, scale {scale:,.0f})."
         )
+    if instrument_type == "FX Forward":
+        return "Synthetic rolling forward quote: quote currency per 100 base units, simple-interest parity; futures-style PnL, not an OTC delivery contract."
     if instrument_type == "Option":
         return "Displayed price combines intrinsic value and simplified time value."
     if instrument_type in EXPIRING_DERIVATIVE_CONTRACT_TYPES:
@@ -383,7 +385,9 @@ def _cds_price(daten: ModuleType, product: dict[str, Any]) -> float:
     macro = getattr(daten, "makro", {}).get(country, {})
     default_probability = float(macro.get("default_probability", macro.get("default_prob", 0.02)))
     debt = float(macro.get("debt_to_gdp", 0.60))
-    deficit = abs(float(macro.get("fiscal_deficit", 0.02)))
+    # fiscal_deficit and GDP are amounts in the same country accounting unit.
+    deficit = max(0.0, float(macro.get("fiscal_deficit", 0.0))) / max(1.0, float(macro.get("bip_abs", 1.0)))
+    product["fiscal_deficit_ratio"] = deficit
     spread = max(0.002, default_probability * 1.75 + max(0.0, debt - 0.6) * 0.025 + deficit * 0.35)
     product["spread"] = spread
     product["default_probability"] = default_probability
@@ -394,6 +398,12 @@ def _cds_price(daten: ModuleType, product: dict[str, Any]) -> float:
 def _corporate_cds_price(daten: ModuleType, product: dict[str, Any]) -> float:
     ticker = str(product.get("underlying", ""))
     asset = getattr(daten, "aktien", {}).get(ticker, {})
+    retired = getattr(daten, "retired_company_tickers", set())
+    if product.get("credit_event") or ticker in retired:
+        product["credit_event"] = True
+        product["default_probability"] = 1.0
+        product["spread"] = 1.0 - float(product.get("recovery_rate", CDS_RECOVERY_RATE))
+        return product["spread"] * float(product.get("notional", CDS_NOTIONAL)) / CDS_CONTRACT_SCALE
     rating_default = _rating_default_probability(str(asset.get("rating", "BBB")))
     default_probability = float(asset.get("default_probability", asset.get("default_prob", rating_default)))
     debt_ratio = float(asset.get("debt_to_market_cap", 0.20))
@@ -466,11 +476,14 @@ def _fx_forward_price(daten: ModuleType, product: dict[str, Any]) -> float:
     spot = _currency_strength(daten, base) / _currency_strength(daten, quote)
     base_rate = _country_rate(daten, base)
     quote_rate = _country_rate(daten, quote)
-    forward = spot * (1.0 + (base_rate - quote_rate) * tenor / 12.0)
+    # Quote currency per unit of base; simple-interest covered parity.
+    years = tenor / 12.0
+    forward = spot * max(0.0001, 1.0 + quote_rate * years) / max(0.0001, 1.0 + base_rate * years)
     product["spot_rate"] = spot
     product["forward_rate"] = forward
     product["rate_differential"] = base_rate - quote_rate
-    return max(1.0, 100.0 * forward / max(0.0001, spot))
+    product["price_unit"] = "quote currency per 100 base units (synthetic rolling quote)"
+    return max(0.0001, 100.0 * forward)
 
 
 def _inflation_swap_price(daten: ModuleType, product: dict[str, Any]) -> float:
@@ -499,7 +512,7 @@ def _commodity_spread_future_price(daten: ModuleType, product: dict[str, Any]) -
 def _input_cost_spread_price(daten: ModuleType, product: dict[str, Any]) -> float:
     output_code = str(product.get("output_code", ""))
     output = getattr(daten, "processed_products", {}).get(output_code, {})
-    output_price = float(output.get("kurs", 100.0))
+    output_price = _modeled_product_price(output)
     input_cost = _weighted_input_cost(daten, output_code)
     margin = (output_price - input_cost) / max(1.0, output_price)
     shortage = float(output.get("shortage", 0.0))
@@ -604,8 +617,16 @@ def _weighted_input_cost(daten: ModuleType, output_code: str) -> float:
     cost = 0.0
     for code, weight in inputs.items():
         asset = _market_asset(daten, str(code))
-        cost += float(asset.get("kurs", 100.0)) * (float(weight) / total_weight)
+        cost += _modeled_product_price(asset) * (float(weight) / total_weight)
     return cost
+
+
+def _modeled_product_price(asset: dict[str, Any]) -> float:
+    """Return a common 100-based index for products and spot for commodities."""
+
+    if "kurs" in asset:
+        return max(0.0001, float(asset["kurs"]))
+    return max(1.0, float(asset.get("price_index", 100.0)))
 
 
 def _currency_strength(daten: ModuleType, region: str) -> float:

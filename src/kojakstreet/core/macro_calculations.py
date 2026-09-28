@@ -6,7 +6,7 @@ import daten
 from kojakstreet.core.expectations import record_macro_report, record_policy_report
 from kojakstreet.core.fiscal import ensure_country_financials, pre_macro_impulses, update_country_financials
 from kojakstreet.core.global_macro import update_global_macro
-from kojakstreet.core.ratings import DEFAULT_RATING, RATINGS, rating_index
+from kojakstreet.core.ratings import DEFAULT_RATING, RATINGS, default_probability, rating_index
 
 
 def berechne_welt_zins(daten_module=None):
@@ -76,6 +76,8 @@ def update_global_liquidity_index(daten_module=None):
     
     daten_module.gli_index = max(5000.0, daten_module.gli_index * (1.0 + Gesamt_impuls))
     daten_module.GLI_HISTORIE.append(daten_module.gli_index)
+    if len(daten_module.GLI_HISTORIE) > 520:
+        del daten_module.GLI_HISTORIE[:-520]
     update_global_macro(daten_module)
 
 def fuehre_monatlichen_zinsentscheid_durch(add_news_callback, daten_module=None):
@@ -235,16 +237,65 @@ def update_sovereign_ratings(daten_module=None) -> None:
     daten_module = daten if daten_module is None else daten_module
     for data in daten_module.makro.values():
         current_index = rating_index(data.get("rating", DEFAULT_RATING))
-        growth = float(data.get("bip_prozent", 0.0))
-        inflation = float(data.get("inflation", 0.0))
-        unemployment = float(data.get("arbeitslosigkeit", 0.06))
-        debt_to_gdp = float(data.get("debt_to_gdp", 0.62))
-        interest_burden = float(data.get("interest_burden", 0.025))
-        if growth > 0.025 and inflation < 0.035 and unemployment < 0.07 and debt_to_gdp < 0.75:
+        target_rating, credit_score = sovereign_rating_target(data)
+        target_index = rating_index(target_rating)
+        pressure = float(data.get("sovereign_rating_pressure", 0.0))
+        gap = target_index - current_index
+        if gap < 0:
+            pressure -= min(1.25, 0.45 + abs(gap) * 0.10)
+        elif gap > 0:
+            pressure += min(1.50, 0.55 + gap * 0.12)
+        else:
+            pressure *= 0.50
+        if pressure <= -7.0:
             current_index = max(0, current_index - 1)
-        elif growth < -0.01 or inflation > 0.08 or unemployment > 0.12 or debt_to_gdp > 1.15 or interest_burden > 0.075:
+            pressure = 0.0
+        elif pressure >= 5.0:
             current_index = min(len(RATINGS) - 1, current_index + 1)
+            pressure = 0.0
         data["rating"] = RATINGS[current_index]
+        data["default_probability"] = default_probability(data["rating"])
+        data["sovereign_credit_score"] = credit_score
+        data["sovereign_rating_target"] = target_rating
+        data["sovereign_rating_pressure"] = pressure
+
+
+def sovereign_rating_target(data: dict) -> tuple[str, float]:
+    """Return a fundamentals-based target; D is reserved for a realised default."""
+
+    growth = float(data.get("bip_prozent", 0.0))
+    inflation = float(data.get("inflation", 0.02))
+    unemployment = float(data.get("arbeitslosigkeit", 0.06))
+    debt_to_gdp = float(data.get("debt_to_gdp", 0.62))
+    interest_burden = float(data.get("interest_burden", 0.025))
+
+    def bounded(value: float, lower: float, upper: float) -> float:
+        return max(lower, min(upper, value))
+
+    score = (
+        bounded((growth - 0.015) * 10.0, -1.0, 1.0)
+        + bounded((0.045 - inflation) * 8.0, -2.0, 0.5)
+        + bounded((0.08 - unemployment) * 8.0, -1.5, 0.4)
+        + bounded((0.90 - debt_to_gdp) * 3.0, -3.0, 0.6)
+        + bounded((0.06 - interest_burden) * 12.0, -3.0, 0.5)
+    )
+    if score >= 1.60:
+        return "AA", score
+    if score >= 1.00:
+        return "A", score
+    if score >= 0.35:
+        return "BBB+", score
+    if score >= -0.50:
+        return "BBB", score
+    if score >= -1.25:
+        return "BBB-", score
+    if score >= -2.00:
+        return "BB", score
+    if score >= -2.75:
+        return "B", score
+    if score >= -3.50:
+        return "CCC", score
+    return "CC", score
 
 
 def _append_macro_history_point(daten_module, key: str, value: float, date_text: str) -> None:

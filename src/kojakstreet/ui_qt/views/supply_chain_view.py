@@ -479,7 +479,7 @@ class SupplyChainView(QFrame):
 
     def _metric_history(self, row: dict[str, Any], metric: str, legacy_key: str, fallback: float) -> list[float]:
         if self.history_provider is not None:
-            points = self.history_provider(str(row["code"]), metric, 520)
+            points = self.history_provider(str(row["code"]), metric, 1200)
             return _smooth_supply_points(points)
         return _smooth_supply_points(self._history(row["data"], legacy_key, fallback))
 

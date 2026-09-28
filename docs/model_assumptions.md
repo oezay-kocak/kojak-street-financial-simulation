@@ -135,3 +135,58 @@ The model should not be interpreted as:
 
 It is a financial engineering showcase focused on architecture, interaction
 between model components, explainability and LLM-assisted development.
+
+## Clarified units and checkpoint semantics (September 2026)
+
+- Portfolio totals and exposures are converted to GD using the same currency
+  strengths and gold anchor as trading/accounting. Historical local purchase
+  cost is translated at the current FX rate: unrealized PnL measures asset-price
+  performance and does not reconstruct historical FX acquisition PnL.
+- FX forwards remain synthetic futures-style rolling quotes, not OTC contracts
+  with delivery and a contractual strike. Spot S means quote units per base
+  unit. With simple annual rates and tenor T in years, F = S × (1+r_quote×T) /
+  (1+r_base×T). The tradable mark is 100×F in quote currency. Hence FX moves no
+  longer disappear through normalization. Tenor is the product's displayed
+  rolling tenor; dated positions still follow existing expiry/roll mechanics.
+- Sovereign CDS spread uses positive fiscal deficit / GDP, both expressed in the
+  country's existing accounting unit. Surpluses add no deficit premium. The
+  heuristic spread is multiplied by notional / 10,000 to quote a scaled
+  protection indicator. This is a simplified upfront game purchase with existing
+  default settlement, not a calibrated premium-leg/protection-leg valuation.
+- Monthly economic publication supplements the ordinary daily pipeline. Population
+  and monthly structural rebalancing occur in the monthly production phase;
+  this phase also books that day's production/inventories, so the daily-only
+  production phase is skipped to avoid booking them twice. Prices, interest, settlement, portfolio history and date advance
+  occur once through the ordinary daily phases.
+- V6 checkpoints resume the same model/dependency version with complete RNG state
+  and a verified DuckDB history manifest. They preserve bounded live lookbacks;
+  old daily history belongs to the analytical store rather than being duplicated
+  without limit in JSON.
+  Numerical nested caches and bounded computational histories are preserved
+  without additional save-only truncation; object-reference indexes, including
+  resolved fund holdings and pressure targets, are rebuilt from live assets.
+  Only regional and company input/output display histories are reduced to their
+  last two samples in the checkpoint. These are not price/EMA lookbacks; older
+  analytical summaries remain in the matching store, not in the JSON checkpoint.
+  V4/V5 saves remain readable, but their previously truncated histories cannot
+  be reconstructed, so identical continuation of those old saves is not guaranteed.
+  One active world per process remains the supported architecture. Existing v1–v3
+  saves cannot reproduce world states that were never written. The DuckDB database
+  is an analytical derivative of the world; loading discards the abandoned timeline
+  and reconnects only to a matching history identity. The checkpoint is not a
+  backup of the DuckDB archive; copying it without the matching store cannot
+  reproduce old ALL/MAX history.
+
+## Deep-history retention and aggregation
+
+- Active Python histories are bounded above their proven computational lookbacks.
+- DuckDB retains 730 days of raw detail, 20 years of semantic monthly aggregates
+  and permanent yearly aggregates. Price uses OHLC; levels use period end/min/max/
+  mean; rates use mean/end/min/max; only true flows are summed.
+- Structural defaults, IPOs, crypto shutdowns, central-bank actions, rating
+  migrations, distress and recovery are retained in a separate permanent ledger.
+- Detailed company-output and fund-allocation topology is recent/current data; old
+  economic meaning remains in product, company, country, trade and asset summaries.
+- Persistent supply/demand/trade shocks use explicit duration and decay. Processed
+  products use a deterministic 100-based price index so input-cost spreads respond
+  to modeled output and input economics rather than random quote movement.

@@ -435,7 +435,7 @@ class ForexView(QFrame):
 
     def _pair_history(self, pair: ForexPair) -> list[float]:
         if self.history_provider is not None:
-            history = self.history_provider(pair.source_pair or pair.pair, 520)
+            history = self.history_provider(pair.source_pair or pair.pair, 1200)
             if history:
                 return history
         return pair.history

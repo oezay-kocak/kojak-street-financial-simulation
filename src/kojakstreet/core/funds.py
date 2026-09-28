@@ -486,10 +486,7 @@ def _fund_daily_return(
     current_ordinal: int | None = None,
 ) -> float:
     weighted = 0.0
-    for asset_type, ticker, weight in _compiled_underlyings(fund):
-        asset = asset_cache.get((asset_type, ticker))
-        if not asset:
-            continue
+    for asset_type, asset, weight in _resolved_underlyings(fund, asset_cache):
         if asset_type == "Bond":
             change = _bond_price_return_for_day(asset, current_ordinal)
             carry = float(asset.get("yield_to_maturity", 0.0)) / 264.0
@@ -501,6 +498,22 @@ def _fund_daily_return(
         leverage = float(fund.get("leverage", 1.0))
         weighted *= leverage
     return weighted * (1.0 - cash)
+
+
+def _resolved_underlyings(
+    fund: dict[str, Any],
+    asset_cache: dict[tuple[str, str], dict[str, Any]],
+) -> list[tuple[str, dict[str, Any], float]]:
+    resolved = fund.get("_resolved_underlyings")
+    if isinstance(resolved, list):
+        return resolved
+    resolved = [
+        (asset_type, asset, weight)
+        for asset_type, ticker, weight in _compiled_underlyings(fund)
+        if (asset := asset_cache.get((asset_type, ticker))) is not None
+    ]
+    fund["_resolved_underlyings"] = resolved
+    return resolved
 
 
 def _bond_price_return_for_day(asset: dict[str, Any], current_ordinal: int | None) -> float:
@@ -633,19 +646,40 @@ def _collect_fund_purchase_pressure(
 ) -> None:
     if positive_flow <= 0:
         return
-    for asset_type, ticker, weight in _compiled_underlyings(fund):
+    for asset_type, ticker, asset, weight, index_members in _fund_pressure_targets(fund, lookup):
         if asset_type == "Index":
-            index = lookup["Index"].get(ticker, {})
-            constituents = index.get("constituents", {})
-            for stock_ticker, index_weight in constituents.items():
-                stock = lookup["Stock"].get(str(stock_ticker), {})
+            constituents = asset.get("constituents", {})
+            for stock_ticker, stock in index_members:
                 flow_pressures[("Stock", str(stock_ticker))] += _flow_price_pressure(
-                    positive_flow * weight * float(index_weight),
+                    positive_flow * weight * float(constituents.get(stock_ticker, 0.0)),
                     stock,
                 )
             continue
-        asset = lookup.get(asset_type, {}).get(ticker, {})
         flow_pressures[(asset_type, ticker)] += _flow_price_pressure(positive_flow * weight, asset)
+
+
+def _fund_pressure_targets(
+    fund: dict[str, Any],
+    lookup: dict[str, dict[str, dict[str, Any]]],
+) -> list[tuple[str, str, dict[str, Any], float, tuple[tuple[str, dict[str, Any]], ...]]]:
+    cached = fund.get("_fund_pressure_targets")
+    if isinstance(cached, list):
+        return cached
+    targets = []
+    for asset_type, ticker, weight in _compiled_underlyings(fund):
+        asset = lookup.get(asset_type, {}).get(ticker)
+        if asset is None:
+            continue
+        members: tuple[tuple[str, dict[str, Any]], ...] = ()
+        if asset_type == "Index":
+            members = tuple(
+                (str(stock_ticker), stock)
+                for stock_ticker in asset.get("constituents", {})
+                if (stock := lookup["Stock"].get(str(stock_ticker))) is not None
+            )
+        targets.append((asset_type, ticker, asset, weight, members))
+    fund["_fund_pressure_targets"] = targets
+    return targets
 
 
 def _apply_collected_purchase_pressures(
@@ -786,6 +820,8 @@ def _compile_underlyings(fund: dict[str, Any]) -> list[tuple[str, str, float]]:
         for holding in fund.get("underlyings", [])
     ]
     fund["_compiled_underlyings"] = compiled
+    fund.pop("_resolved_underlyings", None)
+    fund.pop("_fund_pressure_targets", None)
     totals = {"equity": 0.0, "bond": 0.0, "commodity": 0.0, "crypto": 0.0}
     income_underlyings = []
     for asset_type, ticker, weight in compiled:

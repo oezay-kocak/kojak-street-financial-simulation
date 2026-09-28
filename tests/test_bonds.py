@@ -99,7 +99,7 @@ def test_need_based_corporate_issuance_adds_cash_and_debt() -> None:
     assert data.aktien["AAA"]["debt"] > before_debt
 
 
-def test_need_based_government_issuance_adds_treasury_cash_and_debt() -> None:
+def test_need_based_government_issuance_does_not_double_count_fiscal_debt() -> None:
     data = _bond_test_data(datetime(1990, 1, 1, tzinfo=timezone.utc))
     data.makro["USA"].update(
         {
@@ -123,8 +123,8 @@ def test_need_based_government_issuance_adds_treasury_cash_and_debt() -> None:
         if bond.get("region") == "USA" and bond.get("issue_reason") == "funding"
     ]
     assert funding_bonds
-    assert data.makro["USA"]["sovereign_cash_buffer"] > before_cash
-    assert data.makro["USA"]["government_debt"] > before_debt
+    assert data.makro["USA"]["sovereign_cash_buffer"] >= before_cash
+    assert data.makro["USA"]["government_debt"] == before_debt
 
 
 def test_partial_bond_refresh_clears_stale_daily_change() -> None:

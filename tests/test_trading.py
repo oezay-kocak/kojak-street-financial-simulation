@@ -29,6 +29,7 @@ def test_spot_trade_can_buy_foreign_asset_with_gold_dinar() -> None:
         daten.bargeld = 0.0
         daten.forex_depot = {currency: 0.0 for currency in daten.WAEHRUNGEN}
         daten.forex_depot["GD"] = 25_000.0
+        daten.depot = {}
         execute_spot_trade(daten, ticker, 10.0, "BUY")
 
         assert daten.depot[ticker]["stueck"] == 10.0

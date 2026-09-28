@@ -7,15 +7,16 @@ base first.
 
 ## How To Run
 
-Start the Qt application:
+Install into a virtual environment as described in the [README](../README.md),
+then start the Qt application from the checkout:
 
 ```powershell
-python kojakstreet_qt_launcher.py
+.\.venv\Scripts\python.exe kojakstreet_qt_launcher.py
 ```
 
 Recommended demo setup:
 
-- start with a fresh simulation state
+- choose Genesis World and seed 1729 for a fresh simulation state
 - advance the simulation by several months before opening the analytical views
 - use the market, macro, supply-chain, bond and portfolio views as the core tour
 - keep the focus on model interaction, not on investment advice

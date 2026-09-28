@@ -42,6 +42,8 @@ def test_bankrupt_company_is_removed_and_replaced() -> None:
     daten.aktien[ticker]["cash_reserves"] = 0.0
     daten.aktien[ticker]["debt_to_market_cap"] = 1.4
     daten.aktien[ticker]["rating"] = "CC"
+    daten.aktien[ticker]["free_cash_flow"] = -10_000_000.0
+    daten.aktien[ticker]["distress_months"] = 9
     daten.depot[ticker] = {"stueck": 3.0, "kaufkurs": 100.0}
 
     failed = bankrupt_tickers(daten)

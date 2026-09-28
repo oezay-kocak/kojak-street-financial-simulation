@@ -19,10 +19,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from kojakstreet.core.financial_products import EXPIRING_DERIVATIVE_CONTRACT_TYPES, derivative_allows_spot_trade
+from kojakstreet.core.financial_products import (
+    EXPIRING_DERIVATIVE_CONTRACT_TYPES,
+    derivative_allows_spot_trade,
+)
 from kojakstreet.core.market_explanations import driver_summary
 from kojakstreet.core.ohlc import history_close
 from kojakstreet.core.trade_preview import validate_trade_request
+from kojakstreet.ui_qt.chart_series import history_date, merge_history_by_date
 from kojakstreet.ui_qt.display import display_label, display_text
 from kojakstreet.ui_qt.formatters import percent, regional_money
 from kojakstreet.ui_qt.widgets.qt_chart import FastChartView
@@ -32,6 +36,7 @@ class AssetChartPanel(QFrame):
     """Right-side quote details and chart panel."""
 
     trade_requested = Signal(str, str, str, float, int)
+    chart_request_changed = Signal()
     SPOT_AND_PERPETUAL_ASSETS: ClassVar[set[str]] = {"Stock", "Commodity", "Crypto"}
     SPOT_ONLY_ASSETS: ClassVar[set[str]] = {"Fund", "Derivative"}
 
@@ -40,7 +45,7 @@ class AssetChartPanel(QFrame):
         self.setObjectName("PanelInner")
         self.state = state
         self.current_asset: tuple[str, str, dict[str, Any]] | None = None
-        self.range_points = 180
+        self.range_points = 132
         self.chart_mode = "Line"
         self.chart_draw_count = 0
         self.last_candle_count = 0
@@ -108,6 +113,7 @@ class AssetChartPanel(QFrame):
         control_bar.addStretch(1)
 
         self.chart_view = FastChartView(title="Price History")
+        self.chart_view.setMinimumHeight(280)
         self.positioning_view = FastChartView(title="Long / Short Interest")
         self.positioning_view.setMinimumHeight(104)
         self.positioning_view.setMaximumHeight(130)
@@ -253,6 +259,7 @@ class AssetChartPanel(QFrame):
             button.setChecked(button_points == points)
         if self.current_asset is not None:
             self.update_asset(*self.current_asset)
+            self.chart_request_changed.emit()
 
     def set_chart_mode(self, mode: str) -> None:
         self.chart_mode = mode
@@ -260,6 +267,7 @@ class AssetChartPanel(QFrame):
             button.setChecked(button.text() == mode)
         if self.current_asset is not None:
             self.update_asset(*self.current_asset)
+            self.chart_request_changed.emit()
 
     def update_asset(self, ticker: str, asset_type: str, data: dict[str, Any], *, redraw_chart: bool = True) -> None:
         self.current_asset = (ticker, asset_type, data)
@@ -282,15 +290,14 @@ class AssetChartPanel(QFrame):
         ticker, asset_type, _current_data = self.current_asset
         self.current_asset = (ticker, asset_type, data)
         self._update_quote_labels(ticker, asset_type, data)
-        price = float(data.get("kurs", 0.0))
+        history = merge_history_by_date(list(data.get("historie", [])))
+        if self.range_points and len(history) > self.range_points:
+            history = history[-self.range_points :]
+        points = self._history_points(history)
+        self._chart_history = history
+        self._chart_points = points
         if self.chart_mode != "Line":
             return
-        points = list(self._chart_points)
-        if not points or abs(points[-1] - price) > 1e-9:
-            points.append(price)
-        if self.range_points and len(points) > self.range_points:
-            points = points[-self.range_points :]
-        self._chart_points = points
         self._update_performance(points)
         self._pending_live_points = points
         self._draw_positioning(data)
@@ -360,9 +367,12 @@ class AssetChartPanel(QFrame):
                 self.last_candle_count = self.chart_view.last_candle_count
                 self.last_candle_interval = self.chart_view.last_candle_interval
             else:
-                self.chart_view.plot_line(points, color=color, title="Price History", label="Price")
+                self.chart_view.plot_line(points, dates=[history_date(item) for item in history], color=color, title="Price History", label="Price")
+            self.chart_view.set_loading(bool(data_loading(self.current_asset[2])), has_data=True)
         else:
-            self.chart_view.show_message("History builds as the simulation runs")
+            self.chart_view.set_loading(bool(data_loading(self.current_asset[2])), has_data=False)
+            if not data_loading(self.current_asset[2]):
+                self.chart_view.show_message("History builds as the simulation runs")
 
     def _draw_positioning(self, data: dict[str, Any]) -> None:
         long_interest = float(data.get("long_interest", 0.0))
@@ -383,7 +393,13 @@ class AssetChartPanel(QFrame):
         if len(points) < 2:
             return
         color = "#14b8a6" if points[-1] >= points[0] else "#f43f5e"
-        self.chart_view.plot_line(points, color=color, title="Price History", label="Price")
+        self.chart_view.plot_line(
+            points,
+            dates=[history_date(item) for item in self._chart_history],
+            color=color,
+            title="Price History",
+            label="Price",
+        )
 
     def _set_order_mode(self, asset_type: str, data: dict[str, Any]) -> None:
         can_trade_spot = asset_type in self.SPOT_AND_PERPETUAL_ASSETS | {"Fund"} or (
@@ -425,3 +441,7 @@ class AssetChartPanel(QFrame):
             if not button.isVisible():
                 continue
             button.setEnabled(amount > 0.0 and self._trade_is_valid(side, amount))
+
+
+def data_loading(data: dict[str, Any]) -> bool:
+    return bool(data.get("_history_loading") or data.get("_history_refreshing"))

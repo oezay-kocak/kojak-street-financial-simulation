@@ -4,6 +4,7 @@ import os
 import time
 from dataclasses import replace
 from datetime import timedelta
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 
 import daten
 from kojakstreet.adapters.legacy_state import snapshot_from_legacy
+from kojakstreet.core.runtime_context import SimulationDelta
 from kojakstreet.ui_qt.app import KojakStreetWindow
 from kojakstreet.ui_qt.views.supply_chain_view import _history_points, _smooth_supply_points
 
@@ -473,6 +475,55 @@ def test_qt_shell_running_tick_applies_live_market_quotes_without_full_refresh()
     assert window.state.date == original_date
     assert first_row["sort_values"][6] == 4321.0
     assert first_row["sort_values"][7] == 3.25
+
+
+def test_qt_shell_daily_advance_keeps_workspace_interactive_and_combo_popup_open() -> None:
+    app = QApplication.instance() or QApplication([])
+    state = snapshot_from_legacy(daten)
+    runtime = FakeRuntime(state)
+    window = KojakStreetWindow(state, runtime)
+    combo = window.findChild(QComboBox, "MarketTypeFilter")
+
+    assert app is not None
+    assert combo is not None
+    window.show()
+    combo.setFocus()
+    combo.showPopup()
+    QApplication.processEvents()
+    assert combo.view().isVisible()
+
+    window._request_simulation_steps(1, force_refresh=False)
+
+    assert window.stack.isEnabled()
+    assert window.side_nav.isEnabled()
+    assert combo.view().isVisible()
+
+    combo.hidePopup()
+    _wait_for_simulation(window)
+    window.close()
+
+
+def test_qt_shell_portfolio_live_delta_does_not_full_refresh_view() -> None:
+    app = QApplication.instance() or QApplication([])
+    state = snapshot_from_legacy(daten)
+    runtime = FakeRuntime(state)
+    runtime.current_delta = lambda: SimulationDelta(
+        1, state.date.strftime("%Y-%m-%d"), frozenset({"portfolio_current"})
+    )
+    runtime.portfolio_current_rows = lambda: [{"cash": 321.0, "positions": 2, "futures": 1}]
+    window = KojakStreetWindow(state, runtime)
+    window.set_active_view("portfolio")
+    portfolio_view = window.views["portfolio"]
+    calls: list[list[dict[str, object]]] = []
+    portfolio_view.refresh = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("full refresh")
+    )
+    portfolio_view.apply_live_current_rows = lambda rows: calls.append(rows)
+
+    window._apply_live_market_updates()
+
+    assert app is not None
+    assert calls == [[{"cash": 321.0, "positions": 2, "futures": 1}]]
 
 
 def test_qt_shell_allows_perpetual_trades_for_derivative_futures_only() -> None:

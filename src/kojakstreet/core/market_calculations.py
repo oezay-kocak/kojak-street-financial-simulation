@@ -8,7 +8,7 @@ import numpy as np
 import daten
 from kojakstreet.core.commodities import commodity_price_signal
 from kojakstreet.core.cryptos import crypto_price_signal
-from kojakstreet.core.fundamentals import ema_values, fundamental_price_signal
+from kojakstreet.core.fundamentals import consume_fundamental_repricing, ema_values
 from kojakstreet.core.funds import update_funds
 from kojakstreet.core.global_macro import global_market_signals
 from kojakstreet.core.ohlc import append_ohlc_from_move, normalize_commodity_supply_key
@@ -104,6 +104,8 @@ def update_markt_kurse(daten_module=None):
                 # Kurs berechnen
                 wechselkurs = s1 / s2 if s2 > 0 else 1.0
                 daten_module.FOREX_PAARE_HISTORIE[paar_key].append((wechselkurs, zeit_str, ""))
+                if len(daten_module.FOREX_PAARE_HISTORIE[paar_key]) > 520:
+                    del daten_module.FOREX_PAARE_HISTORIE[paar_key][:-520]
 
     # 2. ROHSTOFFE DIREKT IN GOLD-DINAR (GD) SCHWANKEN LASSEN
     for runtime in runtime_assets["commodities"]:
@@ -176,7 +178,10 @@ def update_markt_kurse(daten_module=None):
         d["market_cap"] = d["kurs"] * 10000000.0
 
     # 3. AKTIEN BERECHNEN (IN LOKALWÄHRUNG)
-    schock_energie = (daten_module.rohstoffe["CL"]["kurs"] + daten_module.rohstoffe["TTF"]["kurs"]) / 200.0
+    energy_return = sum(
+        float(daten_module.rohstoffe[code].get("aenderung", 0.0)) / 100.0
+        for code in ("CL", "TTF")
+    ) / 2.0
     stock_caps: dict[str, tuple[float, float]] = {}
     for runtime in runtime_assets["stocks"]:
         t = runtime.ticker
@@ -190,22 +195,16 @@ def update_markt_kurse(daten_module=None):
         lokaler_zins_effekt = (0.035 - expected_rate) * 0.3
         matrix_effekt = 0.0
         
-        if br == "Stromerzeuger": matrix_effekt += (schock_energie - 1.0) * 0.05
-        elif br in ["Transport und Logistik", "Automobil", "Maschinenbau", "Landwirtschaft"]: matrix_effekt -= (schock_energie - 1.0) * 0.03
-        if br == "\u00d6l und Gas": matrix_effekt += (schock_energie - 1.0) * 0.018
+        matrix_effekt += stock_energy_price_signal(br, energy_return)
         if br == "Finanzen": matrix_effekt += (expected_rate - 0.035) * 0.12
         if br == "Immobilien": matrix_effekt -= max(0.0, expected_rate - 0.035) * 0.38
         if br in {"Einzelhandel", "Konsumgüter", "Automobil"}:
             matrix_effekt += macro_surprise * 0.55
         
-        fundamental_hebel = fundamental_price_signal(d)
-        
-        aktuelles_eps = max(0.1, d.get("eps", 5.0))
-        aktuelles_kgv = d["kurs"] / aktuelles_eps
-        fundamental_bewertung = max(-0.25, min(0.20, (20.0 - aktuelles_kgv) * 0.003))
+        fundamental_hebel = consume_fundamental_repricing(d)
         
         event_pressure = _event_pressure(daten_module, runtime.land, "Stock")
-        chance = 0.50 + (expected_growth * 2.2) + lokaler_zins_effekt + matrix_effekt + d.get("news_momentum", 0.0) + (0.0025 * gli_faktor) + fundamental_bewertung + fundamental_hebel
+        chance = 0.50 + (expected_growth * 2.2) + lokaler_zins_effekt + matrix_effekt + d.get("news_momentum", 0.0) + (0.0025 * gli_faktor) + fundamental_hebel
         chance += float(d.get("fund_flow_pressure", 0.0))
         chance += macro_surprise * 1.4 - max(0.0, expected_inflation - 0.035) * 0.85
         chance += (liquidity_impulse * 1.6) - (risk_pressure * 0.55) - (curve_pressure * 0.35)
@@ -218,11 +217,6 @@ def update_markt_kurse(daten_module=None):
             chance -= min(0.14, (long_return - 0.45) * 0.10)
         elif long_return < -0.35:
             chance += min(0.09, abs(long_return + 0.35) * 0.08)
-        if br == "\u00d6l und Gas" and long_return > 0.20:
-            chance -= min(0.20, (long_return - 0.20) * 0.28)
-        elif br == "Finanzen" and long_return > 0.25:
-            chance -= min(0.10, (long_return - 0.25) * 0.16)
-
         psych_signal, psych_volatility, *_psych_state = daily_asset_psychology_values(
             d,
             "Stock",
@@ -238,7 +232,6 @@ def update_markt_kurse(daten_module=None):
         richtung = 1 if random.random() < _direction_probability(chance) else -1
         euphoria_score = _tail_score(
             max(0.0, fundamental_hebel) * 7.5,
-            max(0.0, fundamental_bewertung) * 4.5,
             max(0.0, macro_surprise) * 16.0,
             max(0.0, liquidity_impulse) * 22.0,
             max(0.0, psych_signal) * 8.0,
@@ -247,7 +240,6 @@ def update_markt_kurse(daten_module=None):
         )
         stress_score = _tail_score(
             max(0.0, -fundamental_hebel) * 7.5,
-            max(0.0, -fundamental_bewertung) * 4.5,
             max(0.0, -macro_surprise) * 16.0,
             max(0.0, risk_pressure) * 8.0,
             max(0.0, curve_pressure) * 8.0,
@@ -363,6 +355,17 @@ def _direction_probability(chance: float) -> float:
     return max(0.005, min(0.995, chance))
 
 
+def stock_energy_price_signal(sector: str, energy_return: float) -> float:
+    energy_move = max(-0.08, min(0.08, float(energy_return)))
+    if sector in {"Transport und Logistik", "Automobil", "Maschinenbau", "Landwirtschaft"}:
+        return -energy_move * 0.30
+    if sector == "Öl und Gas":
+        return energy_move * 0.18
+    # Utilities already receive energy/input effects through monthly production
+    # and fundamentals; another daily price bonus would count the exposure twice.
+    return 0.0
+
+
 def _market_runtime_assets(daten_module) -> dict[str, list[MarketAssetRuntime]]:
     commodities = getattr(daten_module, "rohstoffe", {})
     stocks = getattr(daten_module, "aktien", {})
@@ -423,10 +426,8 @@ def _update_indices_from_runtime_cache(
             shares = float(asset.get("aktien_anzahl", 10_000_000.0))
             stock_caps[ticker] = (previous_price * shares, current_price * shares)
 
-    for index in getattr(daten_module, "indizes", {}).values():
+    for index, tickers in _index_runtime_rows(daten_module, index_members):
         old_level = float(index.get("kurs", 1000.0))
-        branch = str(index.get("branche", ALL_SECTORS))
-        tickers = index_members.get((str(index.get("land", "")), branch), [])
         total_previous = 0.0
         total_current = 0.0
         constituents = {}
@@ -449,6 +450,29 @@ def _update_indices_from_runtime_cache(
         index["aenderung"] = ((float(index["kurs"]) - old_level) / old_level) * 100 if old_level > 0 else 0.0
 
 
+def _index_runtime_rows(daten_module, index_members) -> list[tuple[dict, list[str]]]:
+    indices = getattr(daten_module, "indizes", {})
+    signature = tuple(
+        (ticker, str(index.get("land", "")), str(index.get("branche", ALL_SECTORS)))
+        for ticker, index in indices.items()
+    )
+    cache = getattr(daten_module, "_market_index_runtime_rows", None)
+    if isinstance(cache, dict) and cache.get("signature") == signature:
+        return cache["rows"]
+    rows = [
+        (
+            index,
+            index_members.get(
+                (str(index.get("land", "")), str(index.get("branche", ALL_SECTORS))),
+                [],
+            ),
+        )
+        for index in indices.values()
+    ]
+    daten_module._market_index_runtime_rows = {"signature": signature, "rows": rows}
+    return rows
+
+
 def _stock_index_members(daten_module) -> dict[tuple[str, str], list[str]]:
     stocks = getattr(daten_module, "aktien", {})
     signature = (len(stocks), tuple(stocks.keys()))
@@ -467,6 +491,7 @@ def _stock_index_members(daten_module) -> dict[tuple[str, str], list[str]]:
         "stock_members_signature": signature,
         "stock_index_members": members,
     }
+    daten_module._market_index_runtime_rows = None
     return members
 
 
@@ -484,9 +509,11 @@ def _asset_ema_diff(asset: dict, period: int) -> float:
     alpha = 2.0 / (period + 1.0)
     previous_len = int(cached.get("length", 0) or 0)
     previous_ema = float(cached.get("ema", 0.0) or 0.0)
-    if previous_ema > 0 and current_len == previous_len + 1:
+    marker = (str(history[-1][1]) if isinstance(history[-1], (tuple, list)) and len(history[-1]) > 1 else "", current_price)
+    previous_marker = tuple(cached.get("marker", ()))
+    if previous_ema > 0 and current_len in {previous_len, previous_len + 1} and marker != previous_marker:
         ema = (current_price * alpha) + (previous_ema * (1.0 - alpha))
-    elif previous_ema > 0 and current_len == previous_len:
+    elif previous_ema > 0 and marker == previous_marker:
         ema = previous_ema
     else:
         prices = [_history_price(entry) for entry in history[-max(period * 4, period + 1) :]]
@@ -494,7 +521,7 @@ def _asset_ema_diff(asset: dict, period: int) -> float:
         if not prices:
             return 0.0
         ema = ema_values(prices, min(period, len(prices)))[-1]
-    cache[cache_key] = {"length": current_len, "ema": ema}
+    cache[cache_key] = {"length": current_len, "ema": ema, "marker": marker}
     return ((current_price - ema) / ema) if ema else 0.0
 
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kojakstreet.core.state import GameState
+from kojakstreet.core.accounting import convert_amount
 
 
 @dataclass(slots=True)
@@ -27,15 +28,15 @@ class PositionAnalytics:
 @dataclass(slots=True)
 class PortfolioAnalytics:
     positions: list[PositionAnalytics] = field(default_factory=list)
-    total_value_local: float = 0.0
-    total_cost_local: float = 0.0
-    unrealized_pnl_local: float = 0.0
+    total_value_gd: float = 0.0
+    total_cost_gd: float = 0.0
+    unrealized_pnl_gd: float = 0.0
     unrealized_pnl_percent: float = 0.0
     region_exposure: dict[str, float] = field(default_factory=dict)
     sector_exposure: dict[str, float] = field(default_factory=dict)
     asset_type_exposure: dict[str, float] = field(default_factory=dict)
-    gross_exposure_local: float = 0.0
-    leveraged_exposure_local: float = 0.0
+    gross_exposure_gd: float = 0.0
+    leveraged_exposure_gd: float = 0.0
 
 
 def build_portfolio_analytics(state: GameState) -> PortfolioAnalytics:
@@ -75,18 +76,19 @@ def build_portfolio_analytics(state: GameState) -> PortfolioAnalytics:
             )
         )
 
-        region_exposure[region] = region_exposure.get(region, 0.0) + value_local
-        sector_exposure[sector] = sector_exposure.get(sector, 0.0) + value_local
-        asset_type_exposure[asset_type] = asset_type_exposure.get(asset_type, 0.0) + value_local
+        region_exposure[region] = region_exposure.get(region, 0.0) + convert_amount(state, value_local, region, "GD")
+        sector_exposure[sector] = sector_exposure.get(sector, 0.0) + convert_amount(state, value_local, region, "GD")
+        asset_type_exposure[asset_type] = asset_type_exposure.get(asset_type, 0.0) + convert_amount(state, value_local, region, "GD")
 
-    total_value = sum(position.value_local for position in positions)
-    total_cost = sum(position.cost_local for position in positions)
+    total_value = sum(convert_amount(state, p.value_local, p.region, "GD") for p in positions)
+    total_cost = sum(convert_amount(state, p.cost_local, p.region, "GD") for p in positions)
     leveraged_exposure = 0.0
     for position in state.perpetuals.values():
         ticker = str(position.get("ticker", ""))
         asset = assets.get(ticker, {})
         price = float(asset.get("kurs", position.get("einstiegskurs", 0.0)))
         exposure = abs(float(position.get("groesse", 0.0)) * price)
+        exposure = convert_amount(state, exposure, str(position.get("land", asset.get("land", "GD"))), "GD")
         leveraged_exposure += exposure
         asset_type = _asset_type_for_ticker(state, ticker)
         region = str(position.get("land", asset.get("land", "GD")))
@@ -97,15 +99,15 @@ def build_portfolio_analytics(state: GameState) -> PortfolioAnalytics:
 
     return PortfolioAnalytics(
         positions=positions,
-        total_value_local=total_value,
-        total_cost_local=total_cost,
-        unrealized_pnl_local=pnl,
+        total_value_gd=total_value,
+        total_cost_gd=total_cost,
+        unrealized_pnl_gd=pnl,
         unrealized_pnl_percent=pnl_percent,
         region_exposure=region_exposure,
         sector_exposure=sector_exposure,
         asset_type_exposure=asset_type_exposure,
-        gross_exposure_local=total_value + leveraged_exposure,
-        leveraged_exposure_local=leveraged_exposure,
+        gross_exposure_gd=total_value + leveraged_exposure,
+        leveraged_exposure_gd=leveraged_exposure,
     )
 
 

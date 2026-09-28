@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from kojakstreet.core.fundamentals import (
+    consume_fundamental_repricing,
     ema_diff,
     ema_values,
     ensure_stock_fundamentals,
     fundamental_price_signal,
+    stage_fundamental_repricing,
     update_stock_fundamentals,
 )
 
@@ -53,7 +55,7 @@ def test_fundamentals_keep_previous_month_comparisons() -> None:
     assert asset["revenue"] != first_revenue
 
 
-def test_fundamental_price_signal_is_not_capped() -> None:
+def test_fundamental_price_signal_is_finite_and_consumed_once() -> None:
     asset = {
         "branche": "Technologie",
         "kurs": 100.0,
@@ -63,4 +65,9 @@ def test_fundamental_price_signal_is_not_capped() -> None:
         "dividend_yield": 0.08,
     }
 
-    assert fundamental_price_signal(asset) > 0.16
+    signal = fundamental_price_signal(asset)
+    assert 0.0 < signal <= 0.12
+    stage_fundamental_repricing(asset, trading_days=4)
+    consumed = [consume_fundamental_repricing(asset) for _ in range(5)]
+    assert sum(consumed) == signal
+    assert consumed[-1] == 0.0

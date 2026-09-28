@@ -1,13 +1,27 @@
 import daten
 from kojakstreet.core.accounting import convert_amount
 from kojakstreet.core.countries import RESERVE_CURRENCY
-from kojakstreet.core.ratings import DEFAULT_RATING, default_probability
+from kojakstreet.core.history import HOT_REALIZED_EVENTS, trim_history
+from kojakstreet.core.ratings import DEFAULT_RATING, RECOVERY_RATE, default_probability
 
 
 def update_laufende_anleihen(add_news_callback, daten_module=None):
     """Calculate coupon payments in each bond's local currency."""
     daten_module = daten if daten_module is None else daten_module
     for anl in daten_module.anleihen[:]:
+        if anl.get("typ") != "STAAT" and (
+            anl.get("defaulted")
+            or str(anl.get("ticker", "")) in getattr(daten_module, "retired_company_tickers", set())
+        ):
+            land = anl.get("land", RESERVE_CURRENCY)
+            recovery = float(anl.get("nominal", 0.0)) * RECOVERY_RATE
+            daten_module.forex_depot[land] = daten_module.forex_depot.get(land, 0.0) + recovery
+            add_news_callback(
+                f" CORPORATE BOND DEFAULT: {anl.get('ticker', '')} paid recovery of {recovery:.2f} {daten_module.LAENDER.get(land, land)}.",
+                "ROT",
+            )
+            daten_module.anleihen.remove(anl)
+            continue
         anl["resttage"] -= 1
 
         if "zinstage_zaehler" not in anl:
@@ -24,6 +38,7 @@ def update_laufende_anleihen(add_news_callback, daten_module=None):
             daten_module.forex_depot[land] = daten_module.forex_depot.get(land, 0.0) + halbjahres_kupon
 
             daten_module.realisierte_guv_historie.append((daten_module.datum, convert_amount(daten_module, halbjahres_kupon, land, RESERVE_CURRENCY)))
+            trim_history(daten_module.realisierte_guv_historie, HOT_REALIZED_EVENTS)
             label = (
                 f"government bond ({land})"
                 if anl["typ"] == "STAAT"
@@ -40,6 +55,7 @@ def update_laufende_anleihen(add_news_callback, daten_module=None):
 
             daten_module.forex_depot[land] = daten_module.forex_depot.get(land, 0.0) + rest_kupon
             daten_module.realisierte_guv_historie.append((daten_module.datum, convert_amount(daten_module, rest_kupon, land, RESERVE_CURRENCY)))
+            trim_history(daten_module.realisierte_guv_historie, HOT_REALIZED_EVENTS)
 
             if anl["typ"] == "STAAT":
                 daten_module.forex_depot[land] = daten_module.forex_depot.get(land, 0.0) + anl["nominal"]
@@ -51,7 +67,7 @@ def update_laufende_anleihen(add_news_callback, daten_module=None):
             else:
                 import random
 
-                akt_rating = daten_module.aktien[anl["ticker"]].get("rating", DEFAULT_RATING)
+                akt_rating = daten_module.aktien.get(anl["ticker"], {}).get("rating", "D")
                 ausfall_risiko = _remaining_term_default_probability(akt_rating, anl)
 
                 if random.random() < ausfall_risiko:

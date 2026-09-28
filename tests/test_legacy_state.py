@@ -6,6 +6,19 @@ from kojakstreet.core.countries import COUNTRIES
 from kojakstreet.core.cryptos import TARGET_CRYPTO_COUNT
 
 
+def test_snapshot_does_not_serialize_fund_reference_caches(monkeypatch) -> None:
+    fund = next(iter(daten.fonds.values()))
+    ticker, stock = next(iter(daten.aktien.items()))
+    monkeypatch.setitem(fund, "_resolved_underlyings", [("Stock", stock, 1.0)])
+    monkeypatch.setitem(fund, "_fund_pressure_targets", [("Stock", ticker, stock, 1.0, ())])
+    for profile in ("full", "markets", "portfolio"):
+        state = snapshot_from_legacy(daten, profile=profile)
+        assert all("_resolved_underlyings" not in row for row in state.funds.values())
+        assert all("_fund_pressure_targets" not in row for row in state.funds.values())
+    # Snapshot filtering must not alter the simulation's live caches.
+    assert fund["_resolved_underlyings"][0][1] is stock
+
+
 def test_snapshot_from_legacy_reads_asset_universe() -> None:
     state = snapshot_from_legacy(daten)
 

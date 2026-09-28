@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 from kojakstreet.core.ohlc import history_close, history_ohlc
@@ -14,6 +15,74 @@ class Candle:
     high: float
     low: float
     close: float
+    date: str = ""
+
+
+def history_date(point: Any) -> str:
+    """Return the simulation/bucket date carried by a history point."""
+    if isinstance(point, (date, datetime)):
+        return point.date().isoformat() if isinstance(point, datetime) else point.isoformat()
+    if isinstance(point, str):
+        return point
+    if isinstance(point, dict):
+        return str(point.get("date", point.get("bucket_end", "")))
+    if isinstance(point, (tuple, list)) and len(point) > 1:
+        value = point[1]
+        if isinstance(value, (date, datetime)):
+            return value.date().isoformat() if isinstance(value, datetime) else value.isoformat()
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def history_ordinal(point: Any) -> float | None:
+    value = history_date(point).strip()
+    if not value:
+        return None
+    try:
+        return float(date.fromisoformat(value[:10]).toordinal())
+    except ValueError:
+        pass
+    try:
+        day, month, year = (int(part) for part in value[:10].split("."))
+        return float(date(year, month, day).toordinal())
+    except (TypeError, ValueError):
+        pass
+    for pattern in ("%d %b %Y", "%d %B %Y", "%b %Y", "%B %Y", "%Y-%m", "%Y"):
+        try:
+            return float(datetime.strptime(value, pattern).date().toordinal())  # noqa: DTZ007
+        except ValueError:
+            continue
+    return None
+
+
+def merge_history_by_date(*series: list[Any]) -> list[Any]:
+    """Merge histories chronologically; later series own overlapping dates."""
+
+    undated: list[Any] = []
+    dated: dict[tuple[str, object], tuple[Any, float | None, str]] = {}
+    for history in series:
+        for point in history:
+            date_text = history_date(point).strip()
+            ordinal = history_ordinal(point)
+            if ordinal is None and not date_text:
+                undated.append(point)
+                continue
+            identity = (
+                ("ordinal", int(ordinal))
+                if ordinal is not None
+                else ("text", date_text)
+            )
+            dated[identity] = (point, ordinal, date_text)
+    ordered = sorted(
+        dated.values(),
+        key=lambda item: (
+            item[1] is None,
+            item[1] if item[1] is not None else 0.0,
+            item[2],
+        ),
+    )
+    return undated + [point for point, _ordinal, _date_text in ordered]
 
 
 def candle_bucket(range_points: int, point_count: int) -> tuple[int, str]:
@@ -59,7 +128,7 @@ def build_candles(points: list[Any], range_points: int) -> tuple[list[Candle], s
             wick = range_hint * 0.35
             high = raw_high + wick
             low = max(0.0, raw_low - wick)
-        candles.append(Candle(open=open_price, high=high, low=low, close=close_price))
+        candles.append(Candle(open=open_price, high=high, low=low, close=close_price, date=history_date(bucket_points[-1])))
         previous_close = close_price
 
     return candles, interval

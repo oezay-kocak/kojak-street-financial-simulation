@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from kojakstreet.core.history import HOT_PRICE_POINTS
+
 
 def history_close(entry: Any) -> float:
     """Return the close price from legacy or OHLC history rows."""
@@ -87,7 +89,7 @@ def append_ohlc_from_move(
     *,
     volatility: float = 0.0,
     label: str = "",
-    limit: int | None = None,
+    limit: int | None = HOT_PRICE_POINTS,
 ) -> None:
     history = asset.setdefault("historie", [])
     history.append(

@@ -15,12 +15,14 @@ from kojakstreet.core.global_macro import ensure_global_macro
 from kojakstreet.core.label_codes import attach_stable_label_codes
 from kojakstreet.core.market_regime import update_market_regime
 
-CURRENT_SAVE_VERSION = 3
+CURRENT_SAVE_VERSION = 6
 
 
 def migrate_save_payload(payload: dict[str, Any]) -> dict[str, Any]:
     migrated = dict(payload)
     version = int(migrated.get("save_version", 1) or 1)
+    if version > CURRENT_SAVE_VERSION:
+        raise ValueError("Save was written by a newer version")
     while version < CURRENT_SAVE_VERSION:
         if version == 1:
             _migrate_v1_to_v2(migrated)

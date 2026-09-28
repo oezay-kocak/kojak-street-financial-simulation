@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
@@ -24,9 +27,10 @@ from kojakstreet.ui_qt.widgets.view_header import ViewHeader
 
 
 class GlobalMacroView(QFrame):
-    def __init__(self, state: GameState) -> None:
+    def __init__(self, state: GameState, history_provider: Callable[[str, int], list[Any]] | None = None) -> None:
         super().__init__()
         self.state = state
+        self.history_provider = history_provider
         self.setObjectName("Panel")
         self.kpi_values: dict[str, QLabel] = {}
         self.table: QTableView | None = None
@@ -236,7 +240,7 @@ class GlobalMacroView(QFrame):
             )
             return
 
-        raw_history = list(self.state.global_macro_history.get(key, []))
+        raw_history = self.history_provider(key, 0) if self.history_provider is not None else list(self.state.global_macro_history.get(key, []))
         history = _display_history(key, raw_history)
         current = float(self.state.global_macro.get(key, 0.0))
         display_current = current * 100.0 if key in _PERCENT_KEYS else current
@@ -299,6 +303,12 @@ def _display_history(key: str, history: list) -> list:
         return history
     converted = []
     for entry in history:
+        if isinstance(entry, dict):
+            converted.append({
+                field: (float(value) * 100.0 if field in {"value", "open", "high", "low", "close"} else value)
+                for field, value in entry.items()
+            })
+            continue
         if isinstance(entry, (tuple, list)) and entry:
             converted.append((float(entry[0]) * 100.0, *entry[1:]))
         else:

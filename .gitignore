@@ -3,6 +3,7 @@
 .pytest_cache/
 .ruff_cache/
 .venv/
+.venv-*/
 __pycache__/
 *.py[cod]
 
@@ -10,6 +11,7 @@ build/
 dist/
 release/
 *.spec
+!Kojak Street Pro.spec
 
 *.egg-info/
 .coverage
@@ -18,3 +20,19 @@ htmlcov/
 spielstand.dat
 *.duckdb
 *.duckdb.wal
+
+# Local diagnostics, raw results and draft reports are not release content.
+artifacts/
+docs/audit-data/
+docs/ui-audit/
+docs/portfolio-audit.md
+docs/KOJAK_*.md
+docs/fast-history-handoff-live-performance-diagnose-2026-09-22.md
+docs/professionalization-*.md
+docs/professionalization-test-results.txt
+docs/projektbericht-2026-09-07.md
+docs/repository-inventar-2026-09-07.md
+docs/savegame-baseline.json
+docs/wheel-smoke-result.txt
+screenshots/chart-v2/
+screenshots/chart-v2-fix/

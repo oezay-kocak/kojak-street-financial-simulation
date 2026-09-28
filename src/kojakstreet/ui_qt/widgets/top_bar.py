@@ -59,7 +59,7 @@ class TopBar(QFrame):
     def _kpi(self, label: str, value: str) -> QFrame:
         frame = QFrame()
         frame.setObjectName("KpiCard")
-        frame.setFixedWidth(132)
+        frame.setMinimumWidth(160)
         box = QVBoxLayout(frame)
         box.setContentsMargins(10, 8, 10, 8)
         box.setSpacing(6)

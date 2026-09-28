@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from copy import copy
 
 from kojakstreet.core.countries import RESERVE_CURRENCY
+from kojakstreet.core.checkpoints import REFERENCE_CACHE_KEYS
 from kojakstreet.core.state import GameState
 
 UI_HISTORY_LIMIT = 520
@@ -57,9 +58,11 @@ def _profile_includes(profile: str) -> set[str]:
         "currency_strength", "portfolio_history", "realized_pnl", "asset_histories", "bond_histories",
     }
     if profile == "markets":
-        return {"stocks", "commodities", "processed_products", "cryptos", "funds", "indices", "derivatives", "macro", "portfolio", "perpetuals", "fx"}
+        return {"stocks", "commodities", "processed_products", "cryptos", "funds", "indices", "derivatives", "macro", "portfolio", "perpetuals", "fx", "currency_strength", "asset_histories"}
     if profile == "status":
         return set()
+    if profile == "mutation":
+        return {"portfolio", "perpetuals", "fx", "loans", "bonds", "currency_strength"}
     if profile == "supply_chain":
         return {"stocks", "commodities", "processed_products", "macro"}
     if profile == "trade_map":
@@ -72,7 +75,7 @@ def _profile_includes(profile: str) -> set[str]:
         return {
             "stocks", "commodities", "cryptos", "funds", "indices", "derivatives",
             "portfolio", "perpetuals", "fx", "loans", "bonds", "portfolio_history",
-            "realized_pnl", "asset_histories",
+            "realized_pnl", "asset_histories", "currency_strength", "bond_market",
         }
     if profile == "macro":
         return {"commodities", "processed_products", "macro", "news"}
@@ -86,7 +89,9 @@ def _profile_includes(profile: str) -> set[str]:
 def _copy_asset_universe(assets: Mapping, *, include_history: bool) -> dict:
     copied = {}
     for ticker, data in assets.items():
-        asset = dict(data)
+        # Never expand the simulation's live reference graph into an IPC/UI
+        # snapshot. These caches can duplicate entire underlying universes.
+        asset = {key: value for key, value in data.items() if key not in REFERENCE_CACHE_KEYS}
         if include_history:
             asset["historie"] = _copy_limited_history(data.get("historie", []))
         else:

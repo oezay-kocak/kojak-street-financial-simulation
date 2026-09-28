@@ -9,19 +9,21 @@ from typing import Any
 
 from kojakstreet.core.companies import (
     bankrupt_tickers,
+    corporate_credit_score,
     fill_company_universe,
     rating_from_finances,
     remove_bankrupt_companies,
+    update_company_finances,
 )
-from kojakstreet.core.fundamentals import update_stock_fundamentals
+from kojakstreet.core.fundamentals import stage_fundamental_repricing, update_stock_fundamentals
 from kojakstreet.core.psychology import update_asset_expectations
-from kojakstreet.core.ratings import DEFAULT_RATING, RATINGS, rating_index
+from kojakstreet.core.ratings import DEFAULT_RATING, RATINGS, default_probability, rating_index
 
 NewsCallback = Callable[[str, str], None]
 
 
 def update_monthly_companies(daten: ModuleType) -> None:
-    energy_shock = (daten.rohstoffe["CL"]["kurs"] + daten.rohstoffe["TTF"]["kurs"]) / 200.0
+    energy_shock = monthly_energy_shock(daten)
     metals_shock = (daten.rohstoffe["HG"]["kurs"] + daten.rohstoffe["LIT"]["kurs"]) / 200.0
     for ticker, asset in daten.aktien.items():
         hedge = company_hedge_profile(daten, asset)
@@ -41,10 +43,22 @@ def update_monthly_companies(daten: ModuleType) -> None:
         sector_factor = 1.0 + ((sector_factor - 1.0) * (1.0 - hedge["sector"]))
         update_stock_fundamentals(asset, land_growth, result, sector_factor)
         update_company_finances_for_asset(daten, asset, sector_factor)
+        stage_fundamental_repricing(asset)
         update_asset_expectations(asset, "Stock")
         update_company_rating(asset)
         if ticker in daten.depot and asset["kurs"] > 10.0:
             pay_dividend(daten, ticker, asset, land_growth)
+
+
+def monthly_energy_shock(daten: ModuleType) -> float:
+    energy_prices = [daten.rohstoffe[code] for code in ("CL", "TTF")]
+    current_level = sum(float(asset["kurs"]) for asset in energy_prices) / len(energy_prices)
+    previous_level = sum(
+        float(asset.get("company_sector_reference_price", asset["kurs"])) for asset in energy_prices
+    ) / len(energy_prices)
+    for asset in energy_prices:
+        asset["company_sector_reference_price"] = float(asset["kurs"])
+    return current_level / max(0.01, previous_level)
 
 
 def update_company_lifecycle(daten: ModuleType, add_news_callback: NewsCallback) -> None:
@@ -65,8 +79,6 @@ def update_company_lifecycle(daten: ModuleType, add_news_callback: NewsCallback)
 
 
 def update_company_finances_for_asset(daten: ModuleType, asset: dict[str, Any], sector_factor: float) -> None:
-    from kojakstreet.core.companies import update_company_finances
-
     update_company_finances(
         asset,
         local_rate=float(daten.makro.get(asset["land"], {}).get("zins", 0.035)),
@@ -84,10 +96,16 @@ def update_company_finances_for_asset(daten: ModuleType, asset: dict[str, Any], 
 def company_hedge_profile(daten: ModuleType, asset: dict[str, Any]) -> dict[str, float]:
     sector = str(asset.get("branche", ""))
     output_mix = asset.get("output_mix") or {asset.get("specialization", ""): 1.0}
-    input_codes = _company_input_codes(output_mix)
-    energy_exposure = _input_share(input_codes, {"CL", "TTF", "NEWC", "FUEL", "FREIGHT", "SHIP", "AIRF"})
-    metals_exposure = _input_share(input_codes, {"HG", "LIT", "COB", "NIK", "ALU", "STL", "XPD", "RHD", "XPT"})
-    logistics_exposure = _input_share(input_codes, {"FREIGHT", "SHIP", "AIRF", "RAIL", "PORT", "WARE", "FUEL"})
+    input_signature = tuple(sorted(str(code) for code in output_mix))
+    if asset.get("_hedge_input_signature") == input_signature:
+        energy_exposure, metals_exposure, logistics_exposure = asset["_hedge_input_exposures"]
+    else:
+        input_codes = _company_input_codes(output_mix)
+        energy_exposure = _input_share(input_codes, {"CL", "TTF", "NEWC", "FUEL", "FREIGHT", "SHIP", "AIRF"})
+        metals_exposure = _input_share(input_codes, {"HG", "LIT", "COB", "NIK", "ALU", "STL", "XPD", "RHD", "XPT"})
+        logistics_exposure = _input_share(input_codes, {"FREIGHT", "SHIP", "AIRF", "RAIL", "PORT", "WARE", "FUEL"})
+        asset["_hedge_input_signature"] = input_signature
+        asset["_hedge_input_exposures"] = (energy_exposure, metals_exposure, logistics_exposure)
     local_macro = daten.makro.get(str(asset.get("land", "")), {})
     rate_stress = max(0.0, float(local_macro.get("zins", 0.035)) - 0.04)
     inflation_stress = max(0.0, float(local_macro.get("inflation", 0.02)) - 0.03)
@@ -162,11 +180,54 @@ def _hedge_summary(profile: dict[str, float]) -> str:
 def update_company_rating(asset: dict[str, Any]) -> None:
     current_rating = asset.get("rating", DEFAULT_RATING)
     current_index = rating_index(current_rating)
-    if asset.get("revenue_growth", 0.0) >= 0.04 and asset.get("free_cash_flow", 0.0) > 0:
-        current_index = max(0, current_index - 1)
-    elif asset.get("revenue_growth", 0.0) <= -0.04 or asset.get("free_cash_flow", 0.0) < 0:
-        current_index = min(len(RATINGS) - 1, current_index + 1)
-    asset["rating"] = RATINGS[rating_from_finances(asset, current_index)]
+    credit_score = corporate_credit_score(asset)
+    target_index = rating_from_finances(asset, current_index, score=credit_score)
+    pressure = float(asset.get("credit_rating_pressure", 0.0))
+    gap = target_index - current_index
+    if gap < 0:
+        pressure -= min(1.5, 0.55 + abs(gap) * 0.12)
+    elif gap > 0:
+        pressure += min(2.0, 0.70 + gap * 0.16)
+    else:
+        pressure *= 0.50
+
+    next_index = current_index
+    if pressure <= -5.0:
+        next_index = max(0, current_index - 1)
+        pressure = 0.0
+    elif pressure >= 3.0:
+        next_index = min(len(RATINGS) - 1, current_index + 1)
+        pressure = 0.0
+
+    distress_before = int(asset.get("distress_months", 0))
+    revenue = max(1.0, float(asset.get("revenue", 1.0)))
+    distress_signals = sum(
+        (
+            float(asset.get("free_cash_flow", 0.0)) <= float(asset.get("interest_expense", 0.0)),
+            float(asset.get("cash_reserves", 0.0)) / revenue < 0.02,
+            float(asset.get("debt_to_market_cap", 0.0)) > 0.75,
+            float(asset.get("interest_coverage", 4.0)) < 1.0,
+        )
+    )
+    if distress_signals >= 3:
+        distress_months = min(120, distress_before + 1)
+    elif distress_signals >= 2:
+        distress_months = max(0, distress_before)
+    else:
+        distress_months = max(0, distress_before - 2)
+    if distress_before == 0 and distress_months > 0:
+        asset["distress_episodes"] = int(asset.get("distress_episodes", 0)) + 1
+
+    asset["rating"] = RATINGS[next_index]
+    asset["default_probability"] = default_probability(asset["rating"])
+    asset["credit_score"] = credit_score
+    asset["credit_rating_target"] = RATINGS[target_index]
+    asset["credit_rating_pressure"] = pressure
+    asset["distress_months"] = distress_months
+    if next_index != current_index:
+        asset["rating_migrations"] = int(asset.get("rating_migrations", 0)) + 1
+        key = "rating_upgrades" if next_index < current_index else "rating_downgrades"
+        asset[key] = int(asset.get(key, 0)) + 1
 
 
 def pay_dividend(daten: ModuleType, ticker: str, asset: dict[str, Any], land_growth: float) -> None:
@@ -213,10 +274,11 @@ def sector_energy_factor(sector: str, energy_shock: float, metals_shock: float) 
     factor = 1.0
     if sector in ["Transport und Logistik", "Automobil", "Chemie", "Maschinenbau", "Landwirtschaft"]:
         factor *= max(0.70, 1.0 - (energy_shock - 1.0) * 0.25)
-    elif sector in ["Ã–l und Gas", "Stromerzeuger"]:
+    elif sector == "\u00d6l und Gas":
         factor *= min(1.40, 1.0 + (energy_shock - 1.0) * 0.30)
-    if sector == "\u00d6l und Gas":
-        factor *= min(1.40, 1.0 + (energy_shock - 1.0) * 0.30)
+    # Utilities consume fuel through their production recipes. Treating the
+    # same high fuel level as a sector-wide revenue windfall reverses that cost
+    # exposure and compounds it again through monthly fundamentals.
     if sector == "Technologie":
         factor *= max(0.75, 1.0 - (metals_shock - 1.0) * 0.20)
     return factor

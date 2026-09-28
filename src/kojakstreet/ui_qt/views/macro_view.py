@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -660,12 +662,28 @@ class CountryDetailView(QFrame):
 
 
 class CountryOverviewPanel(QFrame):
-    def __init__(self, history_provider: Callable[[str, str, int], list[float]] | None = None) -> None:
+    def __init__(self, history_provider: Callable[[str, str, int], list[Any]] | None = None) -> None:
         super().__init__()
         self.history_provider = history_provider
         self.setObjectName("PanelInner")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.range_limit = 365
+        self._current_country: tuple[str, dict, GameState] | None = None
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("HISTORY"))
+        self.range_group = QButtonGroup(self)
+        self.range_group.setExclusive(True)
+        for label, limit in (("1Y", 365), ("5Y", 1825), ("ALL", 0)):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setObjectName("RangeButton")
+            button.setChecked(limit == self.range_limit)
+            button.clicked.connect(lambda _checked=False, value=limit: self._set_range(value))
+            self.range_group.addButton(button)
+            controls.addWidget(button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(10)
@@ -677,6 +695,7 @@ class CountryOverviewPanel(QFrame):
         layout.addLayout(grid, 1)
 
     def update_country(self, region: str, macro: dict, state: GameState) -> None:
+        self._current_country = (region, macro, state)
         charts = [
             ("Inflation", self._metric_history(region, "inflation", state.macro_history.get(f"{region}_INF", []), float(macro.get("inflation", 0.0)), 100.0), "#f59e0b"),
             ("Growth", self._metric_history(region, "gdp", state.macro_history.get(f"{region}_BIP", []), float(macro.get("bip_abs", 0.0)), 1.0), "#14b8a6"),
@@ -687,15 +706,27 @@ class CountryOverviewPanel(QFrame):
             ("Debt/GDP", self._metric_history(region, "debt_gdp", state.macro_history.get(f"{region}_DEBT_GDP", []), float(macro.get("debt_to_gdp", 0.0)), 100.0), "#f97316"),
             ("Credit Growth", self._metric_history(region, "credit", state.macro_history.get(f"{region}_CREDIT", []), float(macro.get("credit_growth", 0.0)), 100.0), "#38bdf8"),
         ]
-        for title, values, color in charts:
-            self.charts[title].plot_line(values, color=color, title=title)
+        for title, series, color in charts:
+            values, dates = series
+            self.charts[title].plot_line(values, dates=dates, color=color, title=title)
 
-    def _metric_history(self, region: str, metric: str, fallback_history: list, fallback: float, multiplier: float) -> list[float]:
+    def _set_range(self, limit: int) -> None:
+        self.range_limit = limit
+        if self._current_country is not None:
+            self.update_country(*self._current_country)
+
+    def _metric_history(self, region: str, metric: str, fallback_history: list, fallback: float, multiplier: float) -> tuple[list[float], list[str]]:
         if self.history_provider is not None:
-            values = self.history_provider(region, metric, 180)
-            if len(values) >= 2:
-                return [value * multiplier for value in values]
-        return _history_values(fallback_history, fallback, multiplier)
+            points = self.history_provider(region, metric, self.range_limit)
+            if len(points) >= 2:
+                values, dates = _dated_history_values(points, multiplier)
+                if len(values) >= 2:
+                    return values, dates
+        values, dates = _dated_history_values(fallback_history[-self.range_limit:] if self.range_limit else fallback_history, multiplier)
+        if len(values) < 2:
+            values = [fallback * multiplier, fallback * multiplier]
+            dates = []
+        return values, dates
 
 
 class RegionalMetricDetailPanel(QFrame):
@@ -798,3 +829,22 @@ def _history_values(history: list, fallback: float, multiplier: float) -> list[f
     if len(values) < 2:
         return [fallback * multiplier, fallback * multiplier]
     return values
+
+
+def _dated_history_values(history: list, multiplier: float) -> tuple[list[float], list[str]]:
+    values: list[float] = []
+    dates: list[str] = []
+    for entry in history:
+        try:
+            if isinstance(entry, dict):
+                values.append(float(entry.get("value", entry.get("close", 0.0))) * multiplier)
+                dates.append(str(entry.get("date", "")))
+            elif isinstance(entry, (tuple, list)):
+                values.append(float(entry[0]) * multiplier)
+                dates.append(str(entry[1]) if len(entry) > 1 else "")
+            else:
+                values.append(float(entry) * multiplier)
+                dates.append("")
+        except (TypeError, ValueError):
+            continue
+    return values, dates

@@ -79,7 +79,7 @@ def test_legacy_runtime_exposes_duckdb_current_state_tables() -> None:
 def test_legacy_runtime_exposes_runtime_context_delta_and_performance_snapshot() -> None:
     runtime = IntegratedRuntime(Path(__file__).resolve().parents[1])
     try:
-        assert runtime.data_store.auto_flush is False
+        assert runtime.data_store.auto_flush is True
         assert runtime.context.legacy_data is runtime.daten
         assert runtime.context.repository is runtime.economy
         assert runtime.context.state is not None

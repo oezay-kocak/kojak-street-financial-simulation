@@ -2,8 +2,13 @@
 
 import gc
 import importlib
+import os
+import random
 import sys
+from datetime import timedelta
 from pathlib import Path
+
+import numpy as np
 
 from kojakstreet.adapters.legacy_state import snapshot_from_legacy
 from kojakstreet.core.asset_market_engine import AssetMarketEngine
@@ -11,6 +16,7 @@ from kojakstreet.core.bond_portfolio_engine import BondPortfolioEngine
 from kojakstreet.core.bonds import ensure_dynamic_bond_market
 from kojakstreet.core.commodities import ensure_commodity_fundamentals
 from kojakstreet.core.companies import ensure_company_universe
+from kojakstreet.core.company_lifecycle import company_hedge_profile
 from kojakstreet.core.cryptos import ensure_crypto_fundamentals
 from kojakstreet.core.data_store import EconomicDataStore
 from kojakstreet.core.economy_repository import EconomyRepository
@@ -20,8 +26,8 @@ from kojakstreet.core.fundamentals import ensure_stock_fundamentals
 from kojakstreet.core.global_macro import ensure_global_macro
 from kojakstreet.core.label_codes import attach_stable_label_codes
 from kojakstreet.core.macro_engine import MacroEngine
-from kojakstreet.core.market_regime import update_market_regime
 from kojakstreet.core.market_data_service import MarketDataService
+from kojakstreet.core.market_regime import update_market_regime
 from kojakstreet.core.production_chains import (
     assign_company_specializations,
     ensure_country_economies,
@@ -43,13 +49,30 @@ from kojakstreet.core.trading_service import TradingService
 class IntegratedRuntime:
     """Adapter that lets the Qt app drive the integrated simulation."""
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        data_dir: Path | None = None,
+        seed: int | None = None,
+        flush_interval_days: int = 30,
+    ) -> None:
+        self.project_root = Path(project_root).resolve()
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
+        if seed is not None:
+            random.seed(int(seed))
+            np.random.seed(int(seed))
         import daten
+        # reload retains dynamic attributes: discard runtime state from the last world.
+        for key in list(vars(daten)):
+            if not key.startswith("__"):
+                delattr(daten, key)
         daten = importlib.reload(daten)
         self.daten = daten
         self.state = SimulationState.from_legacy(daten)
+        if seed is not None:
+            self.daten.simulation_seed = int(seed)
         self.market = AssetMarketEngine(self.state)
         self.macro = MacroEngine(self.state)
         self.bond_portfolio = BondPortfolioEngine(self.state)
@@ -69,10 +92,12 @@ class IntegratedRuntime:
         attach_stable_label_codes(self.state)
         update_market_regime(self.state)
         ensure_dynamic_bond_market(self.state)
+        self.data_dir = Path(data_dir or os.environ.get("KOJAKSTREET_DATA_DIR", project_root / ".cache"))
+        self.save_path = self.data_dir / "spielstand.dat"
         self.data_store = EconomicDataStore(
-            project_root / ".cache" / "kojakstreet.duckdb",
-            flush_interval_days=120,
-            auto_flush=False,
+            self.data_dir / "kojakstreet.duckdb",
+            flush_interval_days=flush_interval_days,
+            auto_flush=True,
         )
         self.economy = EconomyRepository(self.data_store)
         self.trading = TradingService(self.state)
@@ -104,7 +129,33 @@ class IntegratedRuntime:
     def close(self) -> None:
         self.data_store.close()
 
+    @classmethod
+    def open_world_bundle(cls, project_root: Path, bundle_path: Path) -> "IntegratedRuntime":
+        """Validate a closed portable bundle before DuckDB is opened."""
+        from kojakstreet.core.established_world import validate_bundle
+
+        bundle_path = Path(bundle_path).resolve()
+        metadata = validate_bundle(bundle_path)
+        seed = int(metadata.get("config", {}).get("seed", 0))
+        runtime = cls(project_root, data_dir=bundle_path, seed=seed)
+        runtime.load_world_bundle(bundle_path, validate_files=False)
+        return runtime
+
     def asset_history(self, asset_type: str, ticker: str, limit: int = 520) -> list[tuple[float, str, str]]:
+        if limit > 520 or limit <= 0:
+            points = self.data_store.history_series(
+                "asset_daily", "ticker", f"{asset_type}:{ticker}", "price",
+                pixel_budget=1200 if limit <= 0 else limit,
+                semantic_type="price",
+            )
+            if points:
+                return [
+                    (
+                        float(point["close"]), str(point["date"]), str(point["resolution"]),
+                        float(point["open"]), float(point["high"]), float(point["low"]),
+                    )
+                    for point in points
+                ]
         assets = {
             "Stock": getattr(self.daten, "aktien", {}),
             "Commodity": getattr(self.daten, "rohstoffe", {}),
@@ -116,6 +167,10 @@ class IntegratedRuntime:
         return list(assets.get(ticker, {}).get("historie", [])[-limit:])
 
     def bond_history(self, symbol: str, limit: int = 520) -> list[tuple[float, str, str]]:
+        if limit > 520 or limit <= 0:
+            points = self.data_store.history_series("bond_daily", "symbol", symbol, "price", pixel_budget=1200 if limit <= 0 else limit, semantic_type="price")
+            if points:
+                return [(float(point["value"]), str(point["date"]), str(point["resolution"])) for point in points]
         history = self.data_store.bond_history(symbol, limit)
         if history:
             return history
@@ -133,9 +188,17 @@ class IntegratedRuntime:
             "pressure": "pressure",
             "price": "price",
         }.get(metric, metric)
+        if limit > 520 or limit <= 0:
+            semantic = "rate" if column in {"shortage", "pressure"} else ("price" if column == "price" else "level")
+            points = self.data_store.history_series("product_daily", "code", code, column, pixel_budget=1200 if limit <= 0 else limit, semantic_type=semantic)
+            return [float(point["value"]) for point in points]
         return self.data_store.session_series("product_daily", "code", code, column, limit)
 
     def forex_history(self, pair: str, limit: int = 520) -> list[float]:
+        if limit > 520 or limit <= 0:
+            points = self.data_store.history_series("forex_daily", "pair", pair, "rate", pixel_budget=1200 if limit <= 0 else limit, semantic_type="price")
+            if points:
+                return [float(point["value"]) for point in points]
         history = self.data_store.session_series("forex_daily", "pair", pair, "rate", limit)
         if history:
             return history
@@ -159,6 +222,12 @@ class IntegratedRuntime:
             "import_dependency": "import_dependency_history",
             "export_strength": "export_strength_history",
         }.get(metric, metric)
+        if limit > 520 or limit <= 0:
+            column = {"debt_gdp": "debt_to_gdp"}.get(metric, metric)
+            semantic = "level" if column in {"gdp", "population", "trade_balance", "balance_sheet"} else "rate"
+            points = self.data_store.history_series("country_daily", "region", region, column, pixel_budget=1200 if limit <= 0 else limit, semantic_type=semantic)
+            if points:
+                return [float(point["value"]) for point in points]
         source = macro.get(key, []) if key.endswith("_history") else getattr(self.daten, "MAKRO_HISTORIE", {}).get(key, [])
         values = []
         for entry in source[-limit:]:
@@ -169,6 +238,24 @@ class IntegratedRuntime:
         if values:
             return values
         return []
+
+    def country_history_points(self, region: str, metric: str, limit: int = 0) -> list[dict[str, object]]:
+        column = {"debt_gdp": "debt_to_gdp", "credit": "credit_growth"}.get(metric, metric)
+        semantic = "level" if column in {"gdp", "population", "trade_balance", "balance_sheet"} else "rate"
+        return self.data_store.history_series(
+            "country_daily", "region", region, column,
+            from_date=(self.daten.datum - timedelta(days=int(limit))) if limit > 0 else None,
+            pixel_budget=1200 if limit <= 0 else limit,
+            semantic_type=semantic,
+        )
+
+    def global_macro_history(self, metric: str, limit: int = 0) -> list[dict[str, object]]:
+        level_metrics = {"global_m2", "central_bank_balance_sheets", "rrp", "tga", "net_liquidity"}
+        return self.data_store.history_series(
+            "global_macro_daily", "metric", metric, "value",
+            pixel_budget=1200 if limit <= 0 else limit,
+            semantic_type="level" if metric in level_metrics else "rate",
+        )
 
     def asset_quote_rows(self) -> list[dict[str, object]]:
         rows = self.data_store.asset_quote_rows()
@@ -307,20 +394,52 @@ class IntegratedRuntime:
 
         self.data_store.record_day(self.state, current_scope="full")
         self.data_store.flush()
-        speicher.spiel_speichern()
+        speicher.spiel_speichern(self.save_path, analytics=self.data_store.checkpoint_session())
         return self.snapshot()
 
     def load_game(self) -> GameState:
         import speicher
 
-        speicher.spiel_laden()
+        checkpoint = speicher.spiel_laden(self.save_path)
         self.state.sync_from_legacy()
-        self._ensure_market_fundamentals()
-        ensure_global_macro(self.state)
-        attach_stable_label_codes(self.state)
-        update_market_regime(self.state)
-        ensure_dynamic_bond_market(self.state)
+        if not checkpoint:
+            self._ensure_market_fundamentals()
+            ensure_global_macro(self.state)
+            attach_stable_label_codes(self.state)
+            update_market_regime(self.state)
+            ensure_dynamic_bond_market(self.state)
+        self.running = False
+        self.daten.spiel_pausiert = True
+        analytics = checkpoint.get("analytics_session", {}) if checkpoint else {}
+        if checkpoint and analytics.get("manifest"):
+            self.data_store.restore_checkpoint_session(analytics)
+        else:
+            # Legacy saves had no durable history identity. Start a clean
+            # analytical timeline rather than attaching unrelated rows.
+            self.data_store.reset_session()
+            if checkpoint:
+                self.data_store.restore_checkpoint_session(analytics)
+        self.market.warm_runtime_indexes()
         self.data_store.record_day(self.state, current_scope="full")
+        return self.snapshot()
+
+    def load_world_bundle(self, bundle_path: Path, *, validate_files: bool = True) -> GameState:
+        """Load a validated Established World from its matching data directory."""
+        from kojakstreet.core.checkpoints import restore
+        from kojakstreet.core.established_world import read_compressed_checkpoint, validate_bundle
+
+        bundle_path = Path(bundle_path).resolve()
+        if validate_files:
+            validate_bundle(bundle_path)
+        if self.data_store.path.resolve() != (bundle_path / "kojakstreet.duckdb").resolve():
+            raise ValueError("Runtime data directory does not match world bundle")
+        payload = read_compressed_checkpoint(bundle_path / "checkpoint.json.gz")
+        restore(self.daten, payload)
+        self.state.sync_from_legacy()
+        self.data_store.restore_checkpoint_session(payload["analytics_session"])
+        self.running = False
+        self.daten.spiel_pausiert = True
+        self.market.warm_runtime_indexes()
         return self.snapshot()
 
     def trade_spot(self, ticker: str, quantity: float, side: str) -> GameState:
@@ -369,6 +488,9 @@ class IntegratedRuntime:
             ensure_asset_psychology(asset)
         ensure_market_psychology(self.state)
         update_production_chain(self.state, advance_population=False)
+        # Warm static recipe exposure caches outside the timed monthly phase.
+        for asset in self.state.aktien.values():
+            company_hedge_profile(self.state, asset)
         attach_stable_label_codes(self.state)
         update_market_regime(self.state)
         self.market.warm_runtime_indexes()

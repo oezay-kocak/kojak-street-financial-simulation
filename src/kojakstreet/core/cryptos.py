@@ -72,18 +72,37 @@ def ensure_crypto_universe(daten: ModuleType, *, reset: bool = False) -> list[st
     if reset or not hasattr(daten, "kryptos"):
         daten.kryptos = {}
     created: list[str] = []
-    counts = _task_counts(daten.kryptos)
-    for task_code in CRYPTO_TASK_TYPES:
-        for index in range(max(0, START_CHAINS_PER_TASK - counts.get(task_code, 0))):
-            ticker = _unique_ticker(daten.kryptos)
-            daten.kryptos[ticker] = _new_crypto_asset(ticker, task_code, index)
-            created.append(ticker)
+    _trim_excess_universe(daten)
     while len(daten.kryptos) < TARGET_CRYPTO_COUNT:
-        task_code = min(CRYPTO_TASK_TYPES, key=lambda code: _task_counts(daten.kryptos).get(code, 0))
+        counts = _task_counts(daten.kryptos)
+        task_code = min(CRYPTO_TASK_TYPES, key=lambda code: (counts.get(code, 0), code))
         ticker = _unique_ticker(daten.kryptos)
         daten.kryptos[ticker] = _new_crypto_asset(ticker, task_code, len(daten.kryptos))
         created.append(ticker)
     return created
+
+
+def _trim_excess_universe(daten: ModuleType) -> None:
+    while len(daten.kryptos) > TARGET_CRYPTO_COUNT:
+        counts = _task_counts(daten.kryptos)
+        held = set(getattr(daten, "depot", {})) | {
+            str(position.get("ticker", "")) for position in getattr(daten, "perpetuals", {}).values()
+        }
+        candidates = [
+            (ticker, asset)
+            for ticker, asset in daten.kryptos.items()
+            if ticker not in held and counts.get(str(asset.get("task_type", "")), 0) > MIN_CHAINS_PER_TASK
+        ]
+        if not candidates:
+            break
+        ticker, _asset = min(
+            candidates,
+            key=lambda item: (float(item[1].get("market_share", 0.0)), float(item[1].get("kurs", 0.0)), item[0]),
+        )
+        daten.kryptos.pop(ticker, None)
+        for fund in getattr(daten, "fonds", {}).values():
+            if isinstance(fund.get("underlyings"), list):
+                fund["underlyings"] = [entry for entry in fund["underlyings"] if str(entry.get("ticker", "")) != ticker]
 
 
 def update_crypto_economy(daten: ModuleType) -> None:

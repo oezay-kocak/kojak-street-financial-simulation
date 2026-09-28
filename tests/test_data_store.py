@@ -70,6 +70,18 @@ def test_country_macro_history_is_recorded_only_on_report_day(tmp_path) -> None:
     assert store.country_current_rows()[0]["balance_sheet"] == 1234.0
     assert store.country_history("Ameron", "growth") == [0.03]
     assert store.product_history("SDIG", "produced") == [100.0, 100.0, 100.0]
+    completed = datetime(1990, 1, 15)
+    daten.last_completed_simulation_date = completed
+    daten.datum = datetime(1990, 1, 16)
+    daten.last_bond_market_update_ordinal = completed.toordinal()
+    daten.bond_market = [{
+        "symbol": "AMR10", "issuer": "Ameron", "region": "Ameron", "bond_type": "Government",
+        "price": 99.0, "yield_to_maturity": 0.04, "coupon": 0.035, "maturity_years": 10,
+        "rating": "BBB", "last_price_update_ordinal": completed.toordinal(),
+    }]
+    store.record_day(daten, flush=True)
+    assert store._connection.execute("SELECT date, count(*) FROM bond_daily GROUP BY date").fetchall() == [(completed.date(), 1)]
+    assert len(store.bond_current_rows()) == 1
     store.close()
 
 
@@ -224,4 +236,8 @@ def test_event_log_classifies_news_rows(tmp_path) -> None:
     assert {event["event_type"] for event in events} == {"new_company", "default"}
     assert {event["severity"] for event in events} == {"positive", "negative"}
     assert store.phase_metric_current_rows()[0]["duration_ms"] == 88.0
+    store.flush()
+    assert {event["event_type"] for event in store.structural_events()} == {"new_company", "default"}
+    store.record_day(daten, current_scope="full", flush=True)
+    assert len(store.structural_events()) == 2
     store.close()

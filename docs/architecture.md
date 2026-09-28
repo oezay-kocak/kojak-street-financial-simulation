@@ -6,6 +6,17 @@ into a package-based architecture under `src/kojakstreet`.
 The current architecture preserves the old application while building a modern
 Qt runtime around shared core logic.
 
+The supported entry point is `kojakstreet_qt_launcher.py` or the installed
+`kojakstreet-qt` command. Normal startup opens the world chooser, then hands the
+runtime to `LiveSimulationProcess`; `live_worker.py` owns the mutable world in
+a separate process. Qt receives view snapshots, current rows and asynchronous
+history responses. The small `--smoke-test` path does not exercise that handoff.
+
+Genesis creates a fresh world. Established World's default generator uses
+Fast History V2 (yearly/monthly steps, rebaseline, then daily burn-in), not a
+daily production-equivalent simulation of the entire prehistory. Checkpoint V6
+preserves bounded numerical history/state while rebuilding reference caches.
+
 ```mermaid
 flowchart TD
     A["Legacy state: daten.py"] --> B["SimulationState adapter"]
@@ -87,8 +98,5 @@ The project includes tests for:
 - runtime integration
 - performance budgets
 
-Recent local verification:
-
-```text
-219 passed
-```
+Current verification and limitations are recorded in
+[the release-readiness report](release-readiness-2026-09-28.md).

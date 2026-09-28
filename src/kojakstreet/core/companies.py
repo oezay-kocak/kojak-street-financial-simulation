@@ -15,7 +15,7 @@ from kojakstreet.core.production_chains import (
     assign_company_specializations,
     opportunity_sector,
 )
-from kojakstreet.core.ratings import DEFAULT_RATING, RATINGS, default_probability, rating_index
+from kojakstreet.core.ratings import DEFAULT_RATING, rating_index, rating_spread
 
 BRANCHEN = [
     "Automobil",
@@ -39,7 +39,6 @@ BRANCHEN = [
 START_COMPANIES_PER_COUNTRY_SECTOR = 4
 TARGET_COMPANY_COUNT = len(COUNTRY_STYLES) * len(BRANCHEN) * START_COMPANIES_PER_COUNTRY_SECTOR
 INITIAL_MARKET_CAP = 1_000_000_000.0
-BANKRUPT_RATING_INDEX = rating_index("CCC-")
 
 STYLE_NAME_PARTS = {
     "american": {
@@ -219,6 +218,9 @@ def spawn_company(
         "cash_reserves": market_cap * random.uniform(0.04, 0.22),
         "debt": market_cap * random.uniform(0.05, 0.45),
         "debt_to_market_cap": 0.0,
+        "credit_rating_pressure": 0.0,
+        "distress_months": 0,
+        "rating_migrations": 0,
         "status": "active",
         "founded": _date_string(ipo_date or getattr(daten, "datum", None)),
     }
@@ -240,44 +242,89 @@ def update_company_finances(
     debt = float(asset.get("debt", market_cap * 0.20))
     free_cash_flow = float(asset.get("free_cash_flow", 0.0))
     monthly_cash_flow = (free_cash_flow / 12.0) * max(0.35, sector_factor)
-    interest = debt * max(0.0, local_rate + 0.025) / 12.0
+    funding_rate = max(0.0, local_rate + rating_spread(asset.get("rating", DEFAULT_RATING)) + 0.010)
+    annual_interest = debt * funding_rate
+    interest = annual_interest / 12.0
     cash += monthly_cash_flow - interest
     if cash < 0:
         debt += abs(cash) * 1.15
         cash = 0.0
-    elif debt > 0 and cash > market_cap * 0.12:
-        repayment = min(debt * 0.03, cash - market_cap * 0.12)
+    else:
+        revenue = max(1.0, float(asset.get("revenue", market_cap)))
+        cash_target = max(revenue * 0.08, market_cap * 0.05)
+        excess_cash = max(0.0, cash - cash_target)
+        capital_return = excess_cash * 0.08
+        repayment = min(debt * 0.015, capital_return * 0.50)
         debt -= repayment
-        cash -= repayment
+        cash -= capital_return
+        asset["capital_return"] = capital_return
     asset["cash_reserves"] = cash
     asset["debt"] = max(0.0, debt)
     asset["debt_to_market_cap"] = asset["debt"] / market_cap
+    asset["funding_rate"] = funding_rate
+    asset["interest_expense"] = annual_interest
+    asset["interest_coverage"] = free_cash_flow / max(1.0, annual_interest)
 
 
-def rating_from_finances(asset: dict, current_index: int) -> int:
+def rating_from_finances(asset: dict, current_index: int, *, score: float | None = None) -> int:
+    score = corporate_credit_score(asset) if score is None else float(score)
+    if score >= 3.20:
+        return rating_index("AAA")
+    if score >= 1.80:
+        return rating_index("AA")
+    if score >= 1.20:
+        return rating_index("A")
+    if score >= 0.50:
+        return rating_index("BBB+")
+    if score >= -0.25:
+        return rating_index("BBB")
+    if score >= -1.00:
+        return rating_index("BBB-")
+    if score >= -1.80:
+        return rating_index("BB")
+    if score >= -2.60:
+        return rating_index("B")
+    if score >= -3.40:
+        return rating_index("CCC")
+    return rating_index("C")
+
+
+def corporate_credit_score(asset: dict) -> float:
     debt_ratio = float(asset.get("debt_to_market_cap", 0.0))
-    fcf = float(asset.get("free_cash_flow", 0.0))
     cash = float(asset.get("cash_reserves", 0.0))
     revenue = max(1.0, float(asset.get("revenue", 1.0)))
-    if fcf < 0 or cash <= 0:
-        current_index += 1
-    if debt_ratio > 0.75:
-        current_index += 1
-    if debt_ratio > 1.15:
-        current_index += 1
-    if cash > revenue * 0.10 and debt_ratio < 0.35 and fcf > 0:
-        current_index -= 1
-    return max(0, min(len(RATINGS) - 1, current_index))
+    fcf_margin = float(asset.get("free_cash_flow", 0.0)) / revenue
+    cash_buffer = cash / revenue
+    coverage = float(asset.get("interest_coverage", 4.0 if asset.get("free_cash_flow", 0.0) > 0 else -1.0))
+    growth = float(asset.get("revenue_growth", 0.0))
+    profitability = _clamp((fcf_margin - 0.06) * 8.0, -1.6, 1.3)
+    liquidity = _clamp((cash_buffer - 0.08) * 3.0, -0.8, 0.8)
+    leverage = _clamp((0.35 - debt_ratio) * 2.0, -2.2, 0.7)
+    if coverage >= 6.0:
+        coverage_score = 0.7
+    elif coverage >= 3.0:
+        coverage_score = 0.3
+    elif coverage >= 1.5:
+        coverage_score = 0.0
+    elif coverage >= 1.0:
+        coverage_score = -0.6
+    else:
+        coverage_score = -1.5
+    growth_score = _clamp(growth * 5.0, -0.6, 0.6)
+    return profitability + liquidity + leverage + coverage_score + growth_score
 
 
 def bankrupt_tickers(daten: ModuleType) -> list[str]:
     result = []
     for ticker, asset in daten.aktien.items():
         rating = asset.get("rating", DEFAULT_RATING)
-        cash_exhausted = float(asset.get("cash_reserves", 0.0)) <= 0.0
-        overlevered = float(asset.get("debt_to_market_cap", 0.0)) >= 1.0
-        default_grade = rating_index(rating) >= BANKRUPT_RATING_INDEX or default_probability(rating) >= 0.55
-        if cash_exhausted and overlevered and default_grade:
+        revenue = max(1.0, float(asset.get("revenue", 1.0)))
+        cash_exhausted = float(asset.get("cash_reserves", 0.0)) <= revenue * 0.005
+        overlevered = float(asset.get("debt_to_market_cap", 0.0)) >= 0.85
+        persistent = int(asset.get("distress_months", 0)) >= 9
+        weak_cash_generation = float(asset.get("free_cash_flow", 0.0)) <= float(asset.get("interest_expense", 0.0))
+        default_grade = rating_index(rating) >= rating_index("B-") or corporate_credit_score(asset) <= -2.60
+        if persistent and cash_exhausted and overlevered and weak_cash_generation and default_grade:
             result.append(ticker)
     return result
 
@@ -292,9 +339,49 @@ def remove_bankrupt_companies(daten: ModuleType, tickers: list[str]) -> None:
         daten.perpetuals = {
             pos_id: pos for pos_id, pos in daten.perpetuals.items() if pos.get("ticker") != ticker
         }
-        daten.anleihen = [bond for bond in daten.anleihen if bond.get("ticker") != ticker]
+        for bond in getattr(daten, "anleihen", []):
+            if str(bond.get("ticker", "")) == ticker:
+                bond["rating"] = "D"
+                bond["defaulted"] = True
+        for bond in getattr(daten, "bond_market", []):
+            if str(bond.get("ticker", "")) == ticker:
+                bond["rating"] = "D"
+                bond["default_risk"] = 1.0
+                bond["defaulted"] = True
+                bond["price"] = min(float(bond.get("price", 100.0)), 40.0)
+        for product in getattr(daten, "derivatives", {}).values():
+            if str(product.get("instrument_type", "")) == "Corporate Credit Default Swap" and str(product.get("underlying", "")) == ticker:
+                product["credit_event"] = True
+                product["default_probability"] = 1.0
+        _remove_fund_stock_reference(daten, ticker)
         retired.add(str(ticker))
     daten.retired_company_tickers = retired
+
+
+def _remove_fund_stock_reference(daten: ModuleType, ticker: str) -> None:
+    for fund in getattr(daten, "fonds", {}).values():
+        holdings = [
+            holding
+            for holding in fund.get("underlyings", [])
+            if not (str(holding.get("asset_type", "")) == "Stock" and str(holding.get("ticker", "")) == ticker)
+        ]
+        total = sum(float(holding.get("weight", 0.0)) for holding in holdings)
+        if total > 0:
+            for holding in holdings:
+                holding["weight"] = float(holding.get("weight", 0.0)) / total
+        fund["underlyings"] = holdings
+        for key in (
+            "_compiled_underlyings",
+            "_compiled_allocation_totals",
+            "_compiled_income_underlyings",
+            "_resolved_underlyings",
+            "_fund_pressure_targets",
+        ):
+            fund.pop(key, None)
+        fund["_allocations_dirty"] = True
+        fund["_distribution_yield_dirty"] = True
+    if hasattr(daten, "_fund_runtime_cache_dirty"):
+        daten._fund_runtime_cache_dirty = True
 
 
 def _company_name(country: str, sector: str, existing_assets) -> str:
@@ -380,6 +467,10 @@ def _unique_ticker(existing: dict, company_name: str = "") -> str:
         if ticker not in existing:
             return ticker
     return f"X{len(existing):04d}"
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
 
 
 def _ticker_candidates(company_name: str) -> list[str]:

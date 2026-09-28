@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from kojakstreet.core.accounting import convert_amount
+from kojakstreet.ui_qt.formatters import gold_dinar, regional_money
+
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
@@ -79,6 +82,8 @@ class PortfolioView(QFrame):
         splitter.addWidget(self._build_management_panel())
         splitter.setSizes([780, 430])
         layout.addWidget(splitter, 1)
+        if self.positions_model.rowCount():
+            self.positions_table.selectRow(0)
 
     def refresh(self, state: GameState, *, throttle_charts: bool = False) -> None:
         self.state = state
@@ -127,27 +132,27 @@ class PortfolioView(QFrame):
         grid = QGridLayout()
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(8)
-        self._add_kpi(grid, "Cash", money(self.state.cash), 0, 0)
-        self._add_kpi(grid, "Invested", money(self.analytics.total_value_local), 0, 1)
+        self._add_kpi(grid, "Cash", gold_dinar(self.state.cash), 0, 0)
+        self._add_kpi(grid, "Invested", gold_dinar(self.analytics.total_value_gd), 0, 1)
         self._add_kpi(
             grid,
             "Unrealized PnL",
-            f"{money(self.analytics.unrealized_pnl_local)} ({percent(self.analytics.unrealized_pnl_percent)})",
+            f"{gold_dinar(self.analytics.unrealized_pnl_gd)} ({percent(self.analytics.unrealized_pnl_percent)})",
             0,
             2,
-            self.analytics.unrealized_pnl_local,
+            self.analytics.unrealized_pnl_gd,
         )
         self._add_kpi(grid, "Positions", str(len(self.analytics.positions)), 0, 3)
-        self._add_kpi(grid, "Loans", compact_money(sum(self.state.loans.values())), 0, 4)
-        self._add_kpi(grid, "Gross Exposure", compact_money(self.analytics.gross_exposure_local), 1, 0)
-        self._add_kpi(grid, "Leveraged", compact_money(self.analytics.leveraged_exposure_local), 1, 1)
+        self._add_kpi(grid, "Loans", gold_dinar(sum(convert_amount(self.state, amount, region, "GD") for region, amount in self.state.loans.items())), 0, 4)
+        self._add_kpi(grid, "Gross Exposure", gold_dinar(self.analytics.gross_exposure_gd), 1, 0)
+        self._add_kpi(grid, "Leveraged", gold_dinar(self.analytics.leveraged_exposure_gd), 1, 1)
         return grid
 
     def apply_live_current_rows(self, rows: list[dict[str, object]]) -> None:
         if not rows:
             return
         row = rows[0]
-        self._set_kpi("Cash", money(float(row.get("cash", self.state.cash))))
+        self._set_kpi("Cash", gold_dinar(float(row.get("cash", self.state.cash))))
         self._set_kpi("Positions", str(int(row.get("positions", len(self.analytics.positions)))))
         futures = int(row.get("futures", len(self.state.perpetuals)))
         if futures:
@@ -175,17 +180,17 @@ class PortfolioView(QFrame):
         grid.addLayout(box, row, column)
 
     def _update_kpis(self) -> None:
-        self._set_kpi("Cash", money(self.state.cash))
-        self._set_kpi("Invested", money(self.analytics.total_value_local))
+        self._set_kpi("Cash", gold_dinar(self.state.cash))
+        self._set_kpi("Invested", gold_dinar(self.analytics.total_value_gd))
         self._set_kpi(
             "Unrealized PnL",
-            f"{money(self.analytics.unrealized_pnl_local)} ({percent(self.analytics.unrealized_pnl_percent)})",
-            self.analytics.unrealized_pnl_local,
+            f"{gold_dinar(self.analytics.unrealized_pnl_gd)} ({percent(self.analytics.unrealized_pnl_percent)})",
+            self.analytics.unrealized_pnl_gd,
         )
         self._set_kpi("Positions", str(len(self.analytics.positions)))
-        self._set_kpi("Loans", compact_money(sum(self.state.loans.values())))
-        self._set_kpi("Gross Exposure", compact_money(self.analytics.gross_exposure_local))
-        self._set_kpi("Leveraged", compact_money(self.analytics.leveraged_exposure_local))
+        self._set_kpi("Loans", gold_dinar(sum(convert_amount(self.state, amount, region, "GD") for region, amount in self.state.loans.items())))
+        self._set_kpi("Gross Exposure", gold_dinar(self.analytics.gross_exposure_gd))
+        self._set_kpi("Leveraged", gold_dinar(self.analytics.leveraged_exposure_gd))
 
     def _set_kpi(self, label: str, value: str, signed_value: float | None = None) -> None:
         widget = self.kpi_values.get(label)
@@ -227,6 +232,9 @@ class PortfolioView(QFrame):
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         optimize_table_view(table, row_height=34)
 
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((90, 90, 180, 90, 90, 130, 80, 90, 90, 120, 100, 170)):
+            table.setColumnWidth(column, width)
         table.selectionModel().selectionChanged.connect(lambda *_: self._show_selected_position())
         self.positions_table = table
         self._populate_positions_table()
@@ -390,9 +398,9 @@ class PortfolioView(QFrame):
                         f"{position.quantity:,.2f}",
                         f"{position.average_price:,.2f}",
                         f"{position.last_price:,.2f}",
-                        money(position.value_local),
+                        regional_money(position.value_local, position.region),
                         _expiry_label(raw_position.get("expires_at") or asset.get("expires_at")),
-                        f"{money(position.pnl_local)} ({percent(position.pnl_percent)})",
+                        f"{regional_money(position.pnl_local, position.region)} ({percent(position.pnl_percent)})",
                     ],
                 }
             )
@@ -426,9 +434,9 @@ class PortfolioView(QFrame):
                         f"{quantity:,.2f}",
                         f"{entry:,.2f}",
                         f"{last:,.2f}",
-                        money(value),
+                        regional_money(value, str(position.get("land", "GD"))),
                         _expiry_label(position.get("expires_at")),
-                        f"{money(pnl)} | Liq {liquidation_price(position):,.2f}",
+                        f"{regional_money(pnl, str(position.get("land", "GD")))} | Liq {liquidation_price(position):,.2f}",
                     ],
                 }
             )
@@ -573,10 +581,10 @@ class PortfolioView(QFrame):
 
     def _bucket_rows(self, bucket: str, exposure: dict[str, float]) -> list[list[str]]:
         rows = []
-        total = self.analytics.total_value_local
+        total = sum(exposure.values())
         for name, value in self._top_items(exposure, 8):
             share = (value / total * 100.0) if total else 0.0
-            rows.append([bucket, display_label(name), money(value), percent(share)])
+            rows.append([bucket, display_label(name), gold_dinar(value), percent(share)])
         return rows
 
     def _top_dict(self, values: dict[str, float], limit: int) -> dict[str, float]:
@@ -604,7 +612,7 @@ class PortfolioView(QFrame):
         return table
 
     def _balance_rows(self) -> list[list[str]]:
-        rows = [["Cash", "GD", money(self.state.cash), "Reserve currency"]]
+        rows = [["Cash", "GD", gold_dinar(self.state.cash), "Reserve currency"]]
         rows.extend(
             ["FX", display_label(region), f"{amount:,.2f}", "Foreign balance"]
             for region, amount in self.state.fx_balances.items()

@@ -183,7 +183,7 @@ class TradeMapCanvas(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("TradeMapCanvas")
-        self.setMinimumHeight(560)
+        self.setMinimumHeight(400)
         self.countries: list[dict[str, object]] = []
         self.flows: list[dict[str, object]] = []
         self.selected_label = "All Trade"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -43,7 +43,7 @@ from kojakstreet.core.production_chains import (
 from kojakstreet.core.ratings import DEFAULT_RATING, default_probability, normalize_rating
 from kojakstreet.core.state import GameState
 from kojakstreet.core.trade_preview import validate_trade_request
-from kojakstreet.ui_qt.chart_series import build_candles
+from kojakstreet.ui_qt.chart_series import build_candles, history_date, merge_history_by_date
 from kojakstreet.ui_qt.display import display_label, display_text
 from kojakstreet.ui_qt.formatters import (
     compact_money,
@@ -61,6 +61,7 @@ class StockDetailView(QFrame):
 
     back_requested = Signal()
     trade_requested = Signal(str, str, str, float, int)
+    chart_request_changed = Signal()
     SPOT_AND_PERPETUAL_ASSETS: ClassVar[set[str]] = {"Stock", "Commodity", "Crypto"}
     SPOT_ONLY_ASSETS: ClassVar[set[str]] = {"Fund", "Derivative"}
 
@@ -76,6 +77,7 @@ class StockDetailView(QFrame):
         self.selected_metric_label = ""
         self.range_points = 132
         self.chart_mode = "Line"
+        self.enabled_indicators: set[int] = set()
         self.last_candle_count = 0
         self.last_candle_interval = "Daily"
         self.performance_label = QLabel("-")
@@ -100,10 +102,23 @@ class StockDetailView(QFrame):
         self.title.setObjectName("BrandTitle")
         self.subtitle = QLabel("")
         self.subtitle.setObjectName("Muted")
+        self.subtitle.setMinimumWidth(0)
+        self.subtitle.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         title_box.addWidget(self.title)
         title_box.addWidget(self.subtitle)
         header.addWidget(self.back_button, 0)
         header.addLayout(title_box, 1)
+        price_box = QVBoxLayout()
+        price_box.setSpacing(2)
+        self.header_price = QLabel("-")
+        self.header_price.setObjectName("BrandTitle")
+        self.header_price.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.header_change = QLabel("-")
+        self.header_change.setObjectName("DetailValue")
+        self.header_change.setAlignment(Qt.AlignmentFlag.AlignRight)
+        price_box.addWidget(self.header_price)
+        price_box.addWidget(self.header_change)
+        header.addLayout(price_box)
 
         self.kpi_frame = QFrame()
         self.kpi_frame.setObjectName("PanelInner")
@@ -111,17 +126,33 @@ class StockDetailView(QFrame):
         self.kpi_grid.setContentsMargins(12, 10, 12, 10)
         self.kpi_grid.setHorizontalSpacing(18)
         self.kpi_grid.setVerticalSpacing(10)
+        self.kpi_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._fundamental_cards: list[QFrame] = []
+        self._fundamental_card_columns = 0
 
         self.chart_view = FastChartView(title="Price History", legend=True)
+        self.chart_view.setMinimumHeight(390)
         self.positioning_view = FastChartView(title="Long / Short Interest")
         self.positioning_view.setMinimumHeight(104)
         self.positioning_view.setMaximumHeight(132)
         self.detail_tabs = QTabWidget()
         self.detail_tabs.setObjectName("DetailTabs")
+        self.detail_tabs.setMinimumWidth(0)
+        self.detail_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.chart_tab = QFrame()
+        self.chart_tab.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        chart_layout = QVBoxLayout(self.chart_tab)
+        chart_layout.setContentsMargins(0, 6, 0, 0)
+        chart_layout.setSpacing(8)
+        chart_layout.addLayout(self._build_chart_controls())
+        chart_layout.addWidget(self.chart_view, 1)
+        chart_layout.addWidget(self.positioning_view, 0)
         self.overview_tab = QFrame()
+        self.overview_tab.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         overview_layout = QVBoxLayout(self.overview_tab)
         overview_layout.setContentsMargins(0, 0, 0, 0)
-        overview_layout.addWidget(self.kpi_frame)
+        overview_layout.addWidget(self.kpi_frame, 0, Qt.AlignmentFlag.AlignTop)
+        overview_layout.addStretch(1)
         self.supply_table = QTableView()
         self.supply_table.setObjectName("CompanySupplyChainTable")
         self.supply_model = SimpleTableModel(
@@ -138,18 +169,18 @@ class StockDetailView(QFrame):
         optimize_table_view(self.supply_table, row_height=34)
         self.supply_table.selectionModel().selectionChanged.connect(lambda *_: self._draw_selected_supply_metric())
         self.supply_tab = QFrame()
+        self.supply_tab.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         supply_layout = QVBoxLayout(self.supply_tab)
         supply_layout.setContentsMargins(0, 0, 0, 0)
         supply_layout.addWidget(self.supply_table)
-        self.detail_tabs.addTab(self.overview_tab, "Overview")
+        self.detail_tabs.addTab(self.chart_tab, "Chart")
+        self.detail_tabs.addTab(self.overview_tab, "Fundamentals")
         self.detail_tabs.addTab(self.supply_tab, "Supply Chain")
+        self.detail_tabs.currentChanged.connect(self._detail_tab_changed)
 
         layout.addLayout(header)
-        layout.addLayout(self._build_chart_controls())
         layout.addLayout(self._build_order_controls())
-        layout.addWidget(self.detail_tabs)
-        layout.addWidget(self.chart_view, 1)
-        layout.addWidget(self.positioning_view, 0)
+        layout.addWidget(self.detail_tabs, 1)
 
     def _build_chart_controls(self) -> QHBoxLayout:
         control_bar = QHBoxLayout()
@@ -178,6 +209,17 @@ class StockDetailView(QFrame):
             button.clicked.connect(lambda _checked=False, mode=label: self.set_chart_mode(mode))
             self.mode_button_group.addButton(button)
             self.mode_buttons.append(button)
+            control_bar.addWidget(button)
+        self.indicator_buttons: dict[int, QPushButton] = {}
+        for period in (20, 50, 200):
+            button = QPushButton(f"EMA {period}")
+            button.setObjectName("SegmentButton")
+            button.setCheckable(True)
+            button.setChecked(False)
+            button.clicked.connect(
+                lambda checked=False, value=period: self.set_indicator(value, bool(checked))
+            )
+            self.indicator_buttons[period] = button
             control_bar.addWidget(button)
         control_bar.addStretch(1)
         return control_bar
@@ -272,12 +314,25 @@ class StockDetailView(QFrame):
             button.setChecked(button_points == points)
         if self.data:
             self._draw_chart()
+            self.chart_request_changed.emit()
 
     def set_chart_mode(self, mode: str) -> None:
         self.chart_mode = mode
         for button in self.mode_buttons:
             button.setChecked(button.text() == mode)
         if self.data:
+            self._draw_chart()
+            self.chart_request_changed.emit()
+
+    def set_indicator(self, period: int, enabled: bool) -> None:
+        if enabled:
+            self.enabled_indicators.add(int(period))
+        else:
+            self.enabled_indicators.discard(int(period))
+        button = self.indicator_buttons.get(int(period))
+        if button is not None:
+            button.setChecked(bool(enabled))
+        if self.data and self.detail_tabs.currentWidget() is self.chart_tab:
             self._draw_chart()
 
     def update_stock(self, ticker: str, data: dict[str, Any]) -> None:
@@ -319,6 +374,11 @@ class StockDetailView(QFrame):
         else:
             self.title.setText(f"{ticker}  {display_text(data.get('name', ticker))}")
         self.current_price = float(data.get("kurs", 0.0))
+        change = float(data.get("aenderung", 0.0))
+        region = str(data.get("land", data.get("ziel", "GD")))
+        self.header_price.setText(regional_money_precise(self.current_price, region))
+        self.header_change.setText(percent(change))
+        self.header_change.setStyleSheet(f"color: {'#14b8a6' if change >= 0 else '#f43f5e'};")
         self._set_trade_controls(asset_type)
         self._update_order_value()
         self.selected_metric_history = None
@@ -346,13 +406,51 @@ class StockDetailView(QFrame):
         self._rebuild_kpis()
         self._rebuild_supply_chain(previous_supply_identity)
         self._draw_positioning()
-        self.detail_tabs.setVisible(asset_type in {"Stock", "Crypto", "Fund"})
-        if same_asset and previous_tab in {self.overview_tab, self.supply_tab}:
+        self._configure_detail_tabs(asset_type)
+        if same_asset and previous_tab in {self.chart_tab, self.overview_tab, self.supply_tab}:
             self.detail_tabs.setCurrentWidget(previous_tab)
-        elif asset_type in {"Crypto", "Fund"}:
-            self.detail_tabs.setCurrentWidget(self.overview_tab)
-        if redraw_chart and not (asset_type == "Fund" and self.detail_tabs.currentWidget() is self.supply_tab):
+        else:
+            self.detail_tabs.setCurrentWidget(self.chart_tab)
+        if redraw_chart:
             self._draw_chart()
+
+    def update_live_quote(self, data: dict[str, Any], state: GameState | None = None) -> None:
+        if state is not None:
+            self.state = state
+        existing_history = self.data.get("historie", [])
+        self.data = dict(data)
+        if not self.data.get("historie") and existing_history:
+            self.data["historie"] = existing_history
+        self.current_price = float(self.data.get("kurs", self.current_price))
+        history = merge_history_by_date(list(self.data.get("historie", [])))
+        if self.range_points > 0 and len(history) > self.range_points:
+            history = history[-self.range_points :]
+        self.data["historie"] = history
+        change = float(self.data.get("aenderung", 0.0))
+        region = str(self.data.get("land", self.data.get("ziel", "GD")))
+        self.header_price.setText(regional_money_precise(self.current_price, region))
+        self.header_change.setText(percent(change))
+        self.header_change.setStyleSheet(f"color: {'#14b8a6' if change >= 0 else '#f43f5e'};")
+        self._update_order_value()
+        self._draw_chart()
+
+    def _configure_detail_tabs(self, asset_type: str) -> None:
+        has_fundamentals = asset_type in {"Stock", "Commodity", "Crypto", "Fund", "Derivative"}
+        has_supply = asset_type in {"Stock", "Crypto", "Fund"}
+        self.detail_tabs.setTabVisible(self.detail_tabs.indexOf(self.overview_tab), has_fundamentals)
+        self.detail_tabs.setTabVisible(self.detail_tabs.indexOf(self.supply_tab), has_supply)
+        self.detail_tabs.setTabText(
+            self.detail_tabs.indexOf(self.overview_tab),
+            "Overview" if asset_type == "Fund" else "Fundamentals",
+        )
+        self.detail_tabs.setTabText(
+            self.detail_tabs.indexOf(self.supply_tab),
+            "Allocations" if asset_type == "Fund" else "Supply Chain",
+        )
+
+    def _detail_tab_changed(self, _index: int) -> None:
+        if self.detail_tabs.currentWidget() is self.overview_tab:
+            self._layout_fundamental_cards()
 
     def _set_trade_controls(self, asset_type: str) -> None:
         can_trade_spot = asset_type in self.SPOT_AND_PERPETUAL_ASSETS | {"Fund"} or (
@@ -384,12 +482,7 @@ class StockDetailView(QFrame):
             button.setEnabled(amount > 0.0 and self._trade_is_valid(side, amount))
 
     def _rebuild_kpis(self) -> None:
-        while self.kpi_grid.count():
-            item = self.kpi_grid.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
-            elif item.layout() is not None:
-                self._clear_layout(item.layout())
+        self._clear_fundamental_cards()
         if self.asset_type in {"Index", "Forex", "Bond", "GlobalMacro"}:
             self.kpi_frame.setVisible(False)
             return
@@ -465,21 +558,108 @@ class StockDetailView(QFrame):
                 ("Dividend Yield", percent(float(self.data.get("dividend_yield", 0.0)) * 100)),
                 ("EPS", f"{float(self.data.get('eps', 0.0)):,.2f}"),
             ]
+            if "total_debt" in self.data or "debt" in self.data:
+                debt = float(self.data.get("total_debt", self.data.get("debt", 0.0)))
+                values.append(("Debt", regional_money(debt, region, compact=True)))
+            if "interest_coverage" in self.data:
+                values.append(("Interest Coverage", f"{float(self.data['interest_coverage']):,.2f}x"))
+            if "debt_to_equity" in self.data:
+                values.append(("Debt / Equity", f"{float(self.data['debt_to_equity']):,.2f}x"))
         if self.asset_type in {"Stock", "Commodity", "Crypto", "Derivative"}:
             values.append(("Drivers", driver_summary(self.data, self.asset_type)))
         if self.asset_type == "Derivative":
             values.append(("Use Case", derivative_use_case(self.data)))
             values.append(("Pricing Note", str(self.data.get("pricing_note") or derivative_pricing_note(self.data))))
-        for index, item in enumerate(values):
-            if len(item) == 4:
-                label, value, change, color = item
-                self.kpi_grid.addLayout(self._kpi(label, value, change, color), index // 5, index % 5)
-            elif len(item) == 3:
-                label, value, change = item
-                self.kpi_grid.addLayout(self._kpi(label, value, change), index // 5, index % 5)
+        self._build_fundamental_cards(values)
+
+    def _build_fundamental_cards(self, values: list[tuple]) -> None:
+        market_labels = {"Price", "Change", "Market Cap", "Shares", "Open Interest", "AUM"}
+        fundamental_labels = {
+            "Revenue", "Revenue Growth", "Free Cash Flow", "FCF Margin", "EPS", "Dividend Yield",
+            "Production", "Production Growth", "Demand", "Demand Growth", "Transactions", "Transaction Growth",
+            "Network Revenue", "Average Fee", "Active Wallets", "Wallet Growth",
+        }
+        credit_labels = {
+            "Rating", "Default Probability", "Debt", "Interest Coverage", "Debt / Equity",
+            "Circulating Supply", "Inflation", "Extraction Cost", "Cost Growth",
+        }
+        driver_labels = {"Drivers", "Use Case", "Pricing Note"}
+        grouped: dict[str, list[tuple]] = {
+            "Market": [],
+            "Fundamentals": [],
+            "Credit & Capital": [],
+            "Drivers": [],
+        }
+        for item in values:
+            label = str(item[0])
+            if label in market_labels:
+                grouped["Market"].append(item)
+            elif label in fundamental_labels:
+                grouped["Fundamentals"].append(item)
+            elif label in credit_labels:
+                grouped["Credit & Capital"].append(item)
+            elif label in driver_labels:
+                grouped["Drivers"].append(item)
             else:
-                label, value = item
-                self.kpi_grid.addLayout(self._kpi(label, value), index // 5, index % 5)
+                grouped["Fundamentals"].append(item)
+        for title, items in grouped.items():
+            if not items:
+                continue
+            card = QFrame()
+            card.setObjectName("PanelInner")
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 12)
+            card_layout.setSpacing(8)
+            heading = QLabel(title.upper())
+            heading.setObjectName("SectionTitle")
+            card_layout.addWidget(heading)
+            metrics = QGridLayout()
+            metrics.setHorizontalSpacing(18)
+            metrics.setVerticalSpacing(8)
+            for index, item in enumerate(items):
+                if len(item) == 4:
+                    label, value, change, color = item
+                    metric = self._kpi(label, value, change, color)
+                elif len(item) == 3:
+                    label, value, change = item
+                    metric = self._kpi(label, value, change)
+                else:
+                    label, value = item
+                    metric = self._kpi(label, value)
+                metrics.addLayout(metric, index // 2, index % 2)
+            card_layout.addLayout(metrics)
+            card_layout.addStretch(1)
+            self._fundamental_cards.append(card)
+        self._layout_fundamental_cards(force=True)
+
+    def _clear_fundamental_cards(self) -> None:
+        while self.kpi_grid.count():
+            item = self.kpi_grid.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._fundamental_cards = []
+        self._fundamental_card_columns = 0
+
+    def _layout_fundamental_cards(self, *, force: bool = False) -> None:
+        if not self._fundamental_cards:
+            return
+        width = max(self.width(), self.detail_tabs.width())
+        columns = 2 if width < 1100 else 3 if width < 1550 else 4
+        columns = min(columns, len(self._fundamental_cards))
+        if not force and columns == self._fundamental_card_columns:
+            return
+        while self.kpi_grid.count():
+            self.kpi_grid.takeAt(0)
+        for index, card in enumerate(self._fundamental_cards):
+            self.kpi_grid.addWidget(card, index // columns, index % columns)
+        for column in range(columns):
+            self.kpi_grid.setColumnStretch(column, 1)
+        self._fundamental_card_columns = columns
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._layout_fundamental_cards()
 
     def _crypto_task_kpis(self) -> list[tuple[str, str, float]]:
         task_type = str(self.data.get("task_type", ""))
@@ -558,16 +738,18 @@ class StockDetailView(QFrame):
 
     def _rebuild_supply_chain(self, selected_identity: tuple[str, str] | None = None) -> None:
         if self.asset_type == "Fund":
-            self.detail_tabs.setTabText(1, "Allocations")
-            self.detail_tabs.setTabEnabled(1, True)
+            supply_index = self.detail_tabs.indexOf(self.supply_tab)
+            self.detail_tabs.setTabText(supply_index, "Allocations")
+            self.detail_tabs.setTabEnabled(supply_index, True)
             self.supply_model.set_headers(["Ticker", "Name", "Asset Type", "Weight"])
             self.supply_model.right_aligned_columns = {3}
             self._populate_allocation_rows(self._fund_allocation_rows())
             return
-        self.detail_tabs.setTabText(1, "Supply Chain")
+        supply_index = self.detail_tabs.indexOf(self.supply_tab)
+        self.detail_tabs.setTabText(supply_index, "Supply Chain")
         self.supply_model.set_headers(["Role", "Code", "Name", "Share", "Company Qty", "Supply", "Demand", "Inventories", "Shortage", "Pressure"])
         self.supply_model.right_aligned_columns = {3, 4, 5, 6, 7, 8, 9}
-        self.detail_tabs.setTabEnabled(1, self.asset_type in {"Stock", "Crypto"})
+        self.detail_tabs.setTabEnabled(supply_index, self.asset_type in {"Stock", "Crypto"})
         if self.asset_type == "Crypto":
             rows = self._crypto_supply_rows()
             self._populate_supply_rows(rows, selected_identity)
@@ -801,6 +983,8 @@ class StockDetailView(QFrame):
         caption.setObjectName("Muted")
         main = QLabel(value if change is None else f"{value}  {percent(change)}")
         main.setObjectName("DetailValue")
+        if label in {"Drivers", "Use Case", "Pricing Note"}:
+            main.setWordWrap(True)
         direction = change if change is not None else self._metric_direction(label)
         if color is not None:
             main.setStyleSheet(f"color: {color};")
@@ -884,27 +1068,55 @@ class StockDetailView(QFrame):
         self._update_performance(prices)
         if len(prices) >= 2:
             color = "#14b8a6" if prices[-1] >= prices[0] else "#f43f5e"
+            supports_indicators = (
+                self.asset_type in {"Stock", "Commodity", "Crypto", "Fund", "Index"}
+                and self.selected_metric_history is None
+            )
             if self.chart_mode == "Candle" and self.selected_metric_history is None:
-                self.chart_view.plot_candles(history, range_points=self.range_points, title=self._chart_title())
+                candle_prices = [candle.close for candle in build_candles(history, self.range_points)[0]] or prices
+                overlays = self._enabled_ema_series(candle_prices) if supports_indicators else []
+                self.chart_view.plot_candles(
+                    history,
+                    range_points=self.range_points,
+                    title=self._chart_title(),
+                    overlays=overlays,
+                )
                 self.last_candle_count = self.chart_view.last_candle_count
                 self.last_candle_interval = self.chart_view.last_candle_interval
-                ema_prices = [candle.close for candle in build_candles(history, self.range_points)[0]] or prices
-            else:
-                ema_prices = prices
-            if self.asset_type not in {"Stock", "Commodity", "Crypto", "Fund", "Index"} or self.selected_metric_history is not None:
+                self.legend_labels = [label for label, values, _color in overlays if len(values) >= 2]
+            elif not supports_indicators:
                 self.legend_labels = []
-                if not (self.chart_mode == "Candle" and self.selected_metric_history is None):
-                    self.chart_view.plot_line(prices, color=color, title=self._chart_title(), label="Value")
+                self.chart_view.plot_line(
+                    prices,
+                    dates=[history_date(item) for item in history],
+                    color=color,
+                    title=self._chart_title(),
+                    label="Value",
+                )
             else:
                 series_specs = [("Price", prices, color)]
-                series_specs.extend(self._ema_series(ema_prices, 20, "#22d3ee"))
-                series_specs.extend(self._ema_series(ema_prices, 50, "#f59e0b"))
-                series_specs.extend(self._ema_series(ema_prices, 200, "#8b5cf6"))
-                if self.chart_mode != "Candle":
-                    self.chart_view.plot_lines(series_specs, title=self._chart_title(), legend=True)
+                series_specs.extend(self._enabled_ema_series(prices))
+                if self.enabled_indicators:
+                    self.chart_view.plot_lines(
+                        series_specs,
+                        title=self._chart_title(),
+                        legend=True,
+                        dates=[history_date(item) for item in history],
+                    )
+                else:
+                    self.chart_view.plot_line(
+                        prices,
+                        dates=[history_date(item) for item in history],
+                        color=color,
+                        title=self._chart_title(),
+                        label="Price",
+                    )
                 self.legend_labels = [label for label, values, _color in series_specs if label != "Price" and len(values) >= 2]
+            self.chart_view.set_loading(self._history_is_loading(), has_data=True)
         else:
-            self.chart_view.show_message("History builds as the simulation runs")
+            self.chart_view.set_loading(self._history_is_loading(), has_data=False)
+            if not self._history_is_loading():
+                self.chart_view.show_message("History builds as the simulation runs")
 
     def _draw_positioning(self) -> None:
         if self.asset_type not in {"Stock", "Commodity", "Crypto"}:
@@ -938,7 +1150,7 @@ class StockDetailView(QFrame):
             return "Bond Price History"
         if self.asset_type == "GlobalMacro":
             return "Global Macro History"
-        return self.selected_metric_label or "Price History with EMA 20 / EMA 50 / EMA 200"
+        return self.selected_metric_label or "Price History"
 
     def _draw_yield_curve(self, yields: list[float]) -> None:
         if len(yields) < 2:
@@ -953,6 +1165,16 @@ class StockDetailView(QFrame):
         if len(ema) >= 2:
             return [(f"EMA {period}", ema, color)]
         return []
+
+    def _enabled_ema_series(self, prices: list[float]) -> list[tuple[str, list[float], str]]:
+        colors = {20: "#22d3ee", 50: "#f59e0b", 200: "#8b5cf6"}
+        series: list[tuple[str, list[float], str]] = []
+        for period in sorted(self.enabled_indicators):
+            series.extend(self._ema_series(prices, period, colors[period]))
+        return series
+
+    def _history_is_loading(self) -> bool:
+        return bool(self.data.get("_history_loading") or self.data.get("_history_refreshing"))
 
     def _history_entries(self) -> list[Any]:
         return list(self.data.get("historie", []))

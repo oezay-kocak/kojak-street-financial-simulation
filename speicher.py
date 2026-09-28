@@ -2,6 +2,7 @@
 import json
 import os
 import pickle
+from kojakstreet.core.checkpoints import atomic_write, capture, decode, encode, restore
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
@@ -24,6 +25,8 @@ SAVE_VERSION = CURRENT_SAVE_VERSION
 
 
 def _layout():
+    if getattr(daten, "PYSIDE_RUNTIME", False):
+        return None
     try:
         import layout
 
@@ -55,44 +58,16 @@ def _show_error(title, message):
     except Exception:
         print(f"{title}: {message}")
 
-def spiel_speichern():
-    try:
-        save_data = _save_payload()
-        with open(SPEICHER_DATEI, "w", encoding="utf-8") as f:
-            json.dump(_json_ready(save_data), f, ensure_ascii=False, indent=2)
-        _show_status(" SAVE GAME WRITTEN SUCCESSFULLY!", "#00ffaa")
-    except Exception as e:
-        _show_error("Save System", f" Error while saving: {e!s}")
+def spiel_speichern(path=None, *, analytics=None):
+    payload = _save_payload()
+    if analytics is not None:
+        payload["analytics_session"] = analytics
+    atomic_write(path or SPEICHER_DATEI, payload)
+    _show_status(" SAVE GAME WRITTEN SUCCESSFULLY!", "#00ffaa")
 
 
 def _save_payload():
-    return {
-            "save_version": SAVE_VERSION,
-            "saved_at": datetime.now(UTC),
-            "bargeld": daten.bargeld,
-            "forex_depot": _without_runtime_cache(daten.forex_depot),
-            "depot": _without_runtime_cache(daten.depot),
-            "perpetuals": _without_runtime_cache(getattr(daten, "perpetuals", {})),
-            "kredite": _without_runtime_cache(daten.kredite),
-            "anleihen": _without_runtime_cache(daten.anleihen),
-            "datum": daten.datum,
-            "aktien": _without_runtime_cache(daten.aktien),
-            "rohstoffe": _without_runtime_cache(daten.rohstoffe),
-            "processed_products": _without_runtime_cache(getattr(daten, "processed_products", {})),
-            "kryptos": _without_runtime_cache(daten.kryptos),
-            "fonds": _without_runtime_cache(daten.fonds),
-            "derivatives": _without_runtime_cache(getattr(daten, "derivatives", {})),
-            "makro": _without_runtime_cache(daten.makro),
-            "indizes": _without_runtime_cache(getattr(daten, "indizes", {})),
-            "waehrungen_staerke": _without_runtime_cache(daten.waehrungen_staerke),
-            "FOREX_PAARE_HISTORIE": _without_runtime_cache(daten.FOREX_PAARE_HISTORIE),
-            "NEWS_SPEICHER": _without_runtime_cache(daten.NEWS_SPEICHER),
-            "LETZTER_REPORT_MONAT": daten.LETZTER_REPORT_MONAT,
-            "MAKRO_HISTORIE": _without_runtime_cache(daten.MAKRO_HISTORIE),
-            "DEPOT_VERMOEGEN_HISTORIE": _without_runtime_cache(daten.DEPOT_VERMOEGEN_HISTORIE),
-            "anzeige_waehrung": daten.anzeige_waehrung,
-            "realisierte_guv_historie": _without_runtime_cache(daten.realisierte_guv_historie)
-        }
+    return capture(daten)
 
 
 def _json_ready(value):
@@ -118,12 +93,15 @@ def _from_json_ready(value):
         return [_from_json_ready(item) for item in value]
     return value
 
-def spiel_laden():
-    if not os.path.exists(SPEICHER_DATEI):
-        _show_warning("Save System", " No saved game found!")
-        return
+def spiel_laden(path=None):
+    path = path or SPEICHER_DATEI
+    if not os.path.exists(path):
+        raise FileNotFoundError("No saved game found")
     try:
-        load_data = _load_payload(SPEICHER_DATEI)
+        load_data = _load_payload(path)
+        if "checkpoint" in load_data:
+            restore(daten, load_data)
+            return load_data
         
         daten.bargeld = load_data["bargeld"]
         daten.forex_depot = load_data["forex_depot"]
@@ -172,17 +150,35 @@ def spiel_laden():
             ui_layout.update_ui_graphics()
             ui_layout.zeige_status_meldung(" SAVE GAME LOADED SUCCESSFULLY!", "#00ffaa")
     except Exception as e:
-        _show_error("Save System", f" Error while loading: {e!s}")
+        raise ValueError(f"Could not load save: {e}") from e
+
+
+class _LegacyDataUnpickler(pickle.Unpickler):
+    """Legacy primitives and datetime only; never import arbitrary classes."""
+    def find_class(self, module, name):
+        if module == "datetime" and name == "datetime":
+            return datetime
+        raise pickle.UnpicklingError(f"Unsafe legacy pickle global: {module}.{name}")
+
+
+def _reject_nonfinite(value):
+    raise ValueError(f"Non-finite number in save: {value}")
 
 
 def _load_payload(path):
     try:
         with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
-        return migrate_save_payload(_from_json_ready(payload))
+            payload = decode(json.load(f, parse_constant=_reject_nonfinite))
     except (UnicodeDecodeError, json.JSONDecodeError):
         with open(path, "rb") as f:
-            return migrate_save_payload(pickle.load(f))
+            payload = _LegacyDataUnpickler(f).load()
+    if not isinstance(payload, dict):
+        raise ValueError("Save must contain a mapping")
+    if int(payload.get("save_version", 1)) > SAVE_VERSION:
+        raise ValueError("Save was written by a newer version")
+    if "checkpoint" in payload:
+        return payload
+    return migrate_save_payload(payload)
 
 
 def _without_runtime_cache(value):

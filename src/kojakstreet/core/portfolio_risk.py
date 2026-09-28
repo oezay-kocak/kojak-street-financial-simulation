@@ -18,6 +18,7 @@ from kojakstreet.core.financial_products import (
     CDS_NOTIONAL,
     CDS_RECOVERY_RATE,
 )
+from kojakstreet.core.history import HOT_REALIZED_EVENTS, trim_history
 from kojakstreet.core.trading import settle_perpetual
 
 NewsCallback = Callable[[str, str], None]
@@ -99,6 +100,7 @@ def _settle_option_if_expired(
     if payout > 0:
         _credit(daten, payout, region)
     getattr(daten, "realisierte_guv_historie", []).append((today, convert_amount(daten, pnl, region, "GD")))
+    trim_history(getattr(daten, "realisierte_guv_historie", []), HOT_REALIZED_EVENTS)
     del daten.depot[ticker]
     add_news(
         f" OPTION SETTLEMENT: {ticker} expired with payout {payout:,.2f} {region}.",
@@ -121,7 +123,8 @@ def _settle_cds_if_triggered(
         if underlying_type == "Corporate"
         else getattr(daten, "makro", {}).get(underlying, {})
     )
-    triggered = _cds_default_triggered(reference)
+    retired = getattr(daten, "retired_company_tickers", set())
+    triggered = _cds_default_triggered(reference) or (underlying_type == "Corporate" and underlying in retired)
     if not triggered and (expires_at is None or today < expires_at):
         return
     quantity = float(position.get("stueck", 0.0))
@@ -133,6 +136,7 @@ def _settle_cds_if_triggered(
     if payout > 0:
         _credit(daten, payout, region)
     getattr(daten, "realisierte_guv_historie", []).append((today, convert_amount(daten, pnl, region, "GD")))
+    trim_history(getattr(daten, "realisierte_guv_historie", []), HOT_REALIZED_EVENTS)
     del daten.depot[ticker]
     label = "triggered" if triggered else "expired"
     add_news(

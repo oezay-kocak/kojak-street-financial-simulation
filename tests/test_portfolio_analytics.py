@@ -14,11 +14,13 @@ def test_portfolio_analytics_calculates_unrealized_pnl_and_exposure() -> None:
     state.stocks = deepcopy(state.stocks)
     state.stocks[ticker]["kurs"] = 100.0
 
+    state.currency_strength = {key: 1.0 for key in state.currency_strength}
+    state.commodities["XAU"]["kurs"] = 100.0
     analytics = build_portfolio_analytics(state)
 
-    assert analytics.total_value_local == 1000.0
-    assert analytics.total_cost_local == 800.0
-    assert analytics.unrealized_pnl_local == 200.0
+    assert analytics.total_value_gd == 1000.0
+    assert analytics.total_cost_gd == 800.0
+    assert analytics.unrealized_pnl_gd == 200.0
     assert analytics.unrealized_pnl_percent == 25.0
     assert analytics.region_exposure[asset["land"]] == 1000.0
     assert analytics.asset_type_exposure["Stock"] == 1000.0
@@ -31,6 +33,8 @@ def test_portfolio_analytics_classifies_derivative_positions() -> None:
     state.derivatives = deepcopy(state.derivatives)
     state.derivatives[ticker]["kurs"] = 100.0
 
+    state.currency_strength = {key: 1.0 for key in state.currency_strength}
+    state.commodities["XAU"]["kurs"] = 100.0
     analytics = build_portfolio_analytics(state)
 
     assert analytics.positions[0].asset_type == "Derivative"

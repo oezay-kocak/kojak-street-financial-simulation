@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
 
 
 class ViewHeader(QFrame):
@@ -19,13 +19,9 @@ class ViewHeader(QFrame):
         title_label.setObjectName("SectionTitle")
         subtitle_label = QLabel(subtitle)
         subtitle_label.setObjectName("Muted")
+        subtitle_label.setWordWrap(True)
         text_box.addWidget(title_label)
         text_box.addWidget(subtitle_label)
         layout.addLayout(text_box, 1)
 
-        for action in actions or []:
-            button = QPushButton(action)
-            button.setObjectName("ActionButton")
-            button.setEnabled(False)
-            layout.addWidget(button)
-
+        # Reserved action names are not rendered until an implementation exists.

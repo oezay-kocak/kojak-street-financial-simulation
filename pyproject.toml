@@ -1,9 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["daten", "speicher"]
+package-dir = {"" = ".", "kojakstreet" = "src/kojakstreet"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project]
 name = "kojakstreet"
 version = "0.2.0"
-description = "A desktop financial-market simulation migrating from Tkinter to PySide6."
+description = "A desktop financial-market simulation and analytics terminal built with PySide6."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "Özay Kocak" },
 ]
@@ -25,7 +36,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 extend-exclude = [
     "build",
     "dist",

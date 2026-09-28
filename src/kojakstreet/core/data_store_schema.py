@@ -6,6 +6,42 @@ from typing import Any
 
 CREATE_TABLE_STATEMENTS = (
     """
+    CREATE TABLE IF NOT EXISTS history_metadata (
+        key VARCHAR PRIMARY KEY,
+        value VARCHAR
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS history_aggregate (
+        source_table VARCHAR,
+        entity VARCHAR,
+        field VARCHAR,
+        semantic_type VARCHAR,
+        resolution VARCHAR,
+        bucket_start DATE,
+        bucket_end DATE,
+        open_value DOUBLE,
+        high_value DOUBLE,
+        low_value DOUBLE,
+        close_value DOUBLE,
+        mean_value DOUBLE,
+        sum_value DOUBLE,
+        observation_count BIGINT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structural_event (
+        event_id VARCHAR PRIMARY KEY,
+        date DATE,
+        event_type VARCHAR,
+        scope VARCHAR,
+        entity VARCHAR,
+        summary VARCHAR,
+        severity VARCHAR,
+        metadata_json VARCHAR
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS asset_daily (
         date DATE,
         ticker VARCHAR,

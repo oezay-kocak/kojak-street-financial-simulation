@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, timedelta
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -89,7 +90,7 @@ def test_markets_view_refresh_preserves_selected_ticker() -> None:
     assert view.model.rows[source.row()]["ticker"] == ticker
 
 
-def test_markets_view_lazy_draws_chart_only_after_user_selection() -> None:
+def test_markets_view_draws_initial_selection_without_redundant_refresh() -> None:
     app = QApplication.instance() or QApplication([])
     state = snapshot_from_legacy(daten)
 
@@ -98,15 +99,15 @@ def test_markets_view_lazy_draws_chart_only_after_user_selection() -> None:
 
     assert app is not None
     assert table is not None
-    assert view.chart_panel.chart_draw_count == 0
+    assert view.chart_panel.chart_draw_count == 1
 
     view.refresh(snapshot_from_legacy(daten))
 
-    assert view.chart_panel.chart_draw_count == 0
+    assert view.chart_panel.chart_draw_count == 1
 
     table.selectRow(1)
 
-    assert view.chart_panel.chart_draw_count == 1
+    assert view.chart_panel.chart_draw_count == 2
 
 
 def test_markets_view_live_updates_chart_after_user_selection() -> None:
@@ -197,7 +198,10 @@ def test_markets_view_double_click_opens_in_app_stock_detail() -> None:
     assert app is not None
 
     stock_row = next(index for index, row in enumerate(view.model.rows) if row["asset_type"] == "Stock")
-    view.model.rows[stock_row]["data"]["historie"] = [(100.0 + index, "date", "") for index in range(300)]
+    view.model.rows[stock_row]["data"]["historie"] = [
+        (100.0 + index, (date(2025, 1, 1) + timedelta(days=index)).isoformat(), "")
+        for index in range(300)
+    ]
     proxy_index = view.proxy_model.mapFromSource(view.model.index(stock_row, 0))
     view._open_stock_detail(proxy_index)
 
@@ -207,6 +211,10 @@ def test_markets_view_double_click_opens_in_app_stock_detail() -> None:
     assert "RATING" in kpi_texts
     assert "DEFAULT PROBABILITY" in kpi_texts
     assert "Price" not in view.stock_detail_view.legend_labels
+    assert view.stock_detail_view.legend_labels == []
+    view.stock_detail_view.set_indicator(20, True)
+    view.stock_detail_view.set_indicator(50, True)
+    view.stock_detail_view.set_indicator(200, True)
     assert {"EMA 20", "EMA 50", "EMA 200"}.issubset(set(view.stock_detail_view.legend_labels))
     view.stock_detail_view.set_range(264)
     view.stock_detail_view.set_chart_mode("Candle")
@@ -288,7 +296,7 @@ def test_markets_view_live_quotes_load_history_for_open_detail_chart(monkeypatch
     )
 
     assert draws == ["draw"]
-    assert calls == [(row["asset_type"], row["ticker"], 520)]
+    assert calls == []
 
 
 def test_markets_view_double_click_opens_in_app_commodity_detail() -> None:
@@ -308,7 +316,7 @@ def test_markets_view_double_click_opens_in_app_commodity_detail() -> None:
     assert view.stock_detail_view.asset_type == "Commodity"
     assert view.stock_detail_view.ticker == view.model.rows[commodity_row]["ticker"]
     assert "Price" not in view.stock_detail_view.legend_labels
-    assert {"EMA 20", "EMA 50", "EMA 200"}.issubset(set(view.stock_detail_view.legend_labels))
+    assert view.stock_detail_view.legend_labels == []
 
 
 def test_markets_view_double_click_opens_in_app_crypto_detail() -> None:
@@ -336,7 +344,7 @@ def test_markets_view_double_click_opens_in_app_crypto_detail() -> None:
     assert "MARKET SHARE" in kpi_texts
     assert "UTILIZATION" in kpi_texts
     assert "Price" not in view.stock_detail_view.legend_labels
-    assert {"EMA 20", "EMA 50", "EMA 200"}.issubset(set(view.stock_detail_view.legend_labels))
+    assert view.stock_detail_view.legend_labels == []
 
 
 def test_markets_view_keeps_fund_filter_and_shows_new_indices() -> None:

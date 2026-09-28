@@ -43,6 +43,9 @@ def ensure_stock_fundamentals(asset: dict) -> None:
     asset.setdefault("dividend_yield", profile["dividend_yield"])
     asset.setdefault("previous_dividend_yield", profile["dividend_yield"])
     asset.setdefault("previous_eps", float(asset.get("eps", 5.0)))
+    asset.setdefault("operating_health", 0.0)
+    asset.setdefault("fundamental_repricing_remaining", 0.0)
+    asset.setdefault("fundamental_repricing_days", 0)
 
 
 def update_stock_fundamentals(asset: dict, macro_growth: float, result: float, sector_factor: float) -> None:
@@ -53,10 +56,16 @@ def update_stock_fundamentals(asset: dict, macro_growth: float, result: float, s
     previous_fcf_margin = float(asset.get("fcf_margin", 0.0))
     previous_dividend_yield = float(asset.get("dividend_yield", 0.0))
     previous_eps = float(asset.get("eps", 0.0))
-    monthly_growth = _clamp((macro_growth / 12.0) + (result * 0.18) + ((sector_factor - 1.0) * 0.10), -0.12, 0.12)
+    operating_health = _clamp(float(asset.get("operating_health", 0.0)) * 0.78 + result * 0.22, -0.50, 0.50)
+    effective_result = result * 0.35 + operating_health * 0.65
+    monthly_growth = _clamp((macro_growth / 12.0) + (effective_result * 0.18) + ((sector_factor - 1.0) * 0.10), -0.12, 0.12)
     revenue = max(1.0, previous_revenue * (1.0 + monthly_growth))
     profile = _profile(asset)
-    fcf_margin = _clamp(profile["fcf_margin"] + (result * 0.08) + ((sector_factor - 1.0) * 0.05), -0.05, 0.35)
+    fcf_margin = _clamp(
+        profile["fcf_margin"] + (result * 0.06) + (operating_health * 0.16) + ((sector_factor - 1.0) * 0.05),
+        -0.08,
+        0.35,
+    )
     free_cash_flow = revenue * fcf_margin
     dividend_yield = _clamp(profile["dividend_yield"] + (fcf_margin * 0.08) - max(monthly_growth, 0.0) * 0.08, 0.0, 0.08)
 
@@ -66,6 +75,7 @@ def update_stock_fundamentals(asset: dict, macro_growth: float, result: float, s
     asset["previous_fcf_margin"] = previous_fcf_margin
     asset["previous_dividend_yield"] = previous_dividend_yield
     asset["previous_eps"] = previous_eps
+    asset["operating_health"] = operating_health
     asset["revenue"] = revenue
     asset["revenue_growth"] = monthly_growth
     asset["fcf_margin"] = fcf_margin
@@ -78,10 +88,47 @@ def fundamental_price_signal(asset: dict) -> float:
     if "revenue" not in asset or "free_cash_flow" not in asset:
         ensure_stock_fundamentals(asset)
     market_cap = max(1.0, float(asset.get("market_cap", 1.0)))
+    profile = _profile(asset)
     revenue_growth = float(asset.get("revenue_growth", 0.0))
+    previous_growth = float(asset.get("previous_revenue_growth", revenue_growth))
     fcf_yield = float(asset.get("free_cash_flow", 0.0)) / market_cap
+    expected_fcf_yield = profile["fcf_margin"] / profile["ps"]
+    fcf_margin = float(asset.get("fcf_margin", profile["fcf_margin"]))
+    previous_margin = float(asset.get("previous_fcf_margin", fcf_margin))
     dividend_yield = float(asset.get("dividend_yield", 0.0))
-    return (revenue_growth * 1.5) + ((fcf_yield - 0.04) * 0.8) + (dividend_yield * 0.35)
+    previous_dividend = float(asset.get("previous_dividend_yield", dividend_yield))
+    valuation_residual = _clamp(
+        (fcf_yield - expected_fcf_yield) / max(0.02, expected_fcf_yield),
+        -0.80,
+        0.80,
+    )
+    signal = (
+        valuation_residual * 0.050
+        + (revenue_growth - previous_growth) * 0.80
+        + (fcf_margin - previous_margin) * 0.70
+        + (dividend_yield - previous_dividend) * 0.15
+    )
+    return _clamp(signal, -0.12, 0.12)
+
+
+def stage_fundamental_repricing(asset: dict, *, trading_days: int = 22) -> float:
+    signal = fundamental_price_signal(asset)
+    asset["fundamental_repricing_remaining"] = signal
+    asset["fundamental_repricing_days"] = max(1, int(trading_days))
+    return signal
+
+
+def consume_fundamental_repricing(asset: dict) -> float:
+    days = max(0, int(asset.get("fundamental_repricing_days", 0)))
+    remaining = float(asset.get("fundamental_repricing_remaining", 0.0))
+    if days <= 0 or abs(remaining) < 1e-12:
+        asset["fundamental_repricing_remaining"] = 0.0
+        asset["fundamental_repricing_days"] = 0
+        return 0.0
+    daily_signal = remaining / days
+    asset["fundamental_repricing_remaining"] = remaining - daily_signal
+    asset["fundamental_repricing_days"] = days - 1
+    return daily_signal
 
 
 def ema_values(values: Iterable[float], period: int) -> list[float]:

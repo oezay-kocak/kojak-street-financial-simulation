@@ -12,6 +12,7 @@ from kojakstreet.core.financial_products import (
     EXPIRING_DERIVATIVE_CONTRACT_TYPES,
     derivative_allows_spot_trade,
 )
+from kojakstreet.core.history import HOT_REALIZED_EVENTS, trim_history
 
 
 class TradeError(ValueError):
@@ -55,6 +56,7 @@ def execute_spot_trade(daten: Any, ticker: str, quantity: float, side: str) -> N
             del portfolio.positions[ticker]
         _credit(daten, notional, region)
         daten.realisierte_guv_historie.append((daten.datum, convert_amount(daten, pnl_local, region, "GD")))
+        trim_history(daten.realisierte_guv_historie, HOT_REALIZED_EVENTS)
         return
 
     raise TradeError("Unsupported spot side.")
@@ -133,6 +135,7 @@ def settle_perpetual(daten: Any, position_id: str) -> dict[str, float | str]:
     payout = max(0.0, float(position.get("margin", 0.0)) + pnl)
     _credit(daten, payout, region)
     daten.realisierte_guv_historie.append((daten.datum, convert_amount(daten, pnl, region, "GD")))
+    trim_history(daten.realisierte_guv_historie, HOT_REALIZED_EVENTS)
     del portfolio.perpetuals[position_id]
     return {"ticker": ticker, "pnl": pnl, "payout": payout, "region": region}
 

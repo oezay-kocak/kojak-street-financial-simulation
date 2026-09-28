@@ -65,13 +65,14 @@ class DailySimulation:
             return
 
         self.daten.simulation_phase_timings = []
-        if self._phase("monthly_report", self._run_monthly_company_report_if_due):
-            return
+        monthly_processed = self._phase("monthly_report", self._run_monthly_company_report_if_due)
 
         self._phase("events", lambda: run_event_phase(self.daten, self.add_news))
 
         self._phase("global_macro", self._update_global_macro)
-        self._phase("daily_production", self._update_daily_production)
+        # Monthly production already books today's inventories and flows.
+        if not monthly_processed:
+            self._phase("daily_production", self._update_daily_production)
         self._phase("credit_interest", lambda: update_credit_interest_charges(self.daten))
         self._phase("bond_market", self._update_bond_market_if_due)
         self._phase("asset_market", self._update_asset_market)
@@ -97,6 +98,8 @@ class DailySimulation:
         self.daten.handels_tage_zaehler += 1
         zeit_str = self.daten.datum.strftime("%d.%m.%Y")
         self.daten.DEPOT_VERMOEGEN_HISTORIE.append((get_net_worth(self.daten), zeit_str))
+        if len(self.daten.DEPOT_VERMOEGEN_HISTORIE) > 520:
+            del self.daten.DEPOT_VERMOEGEN_HISTORIE[:-520]
 
         if self._policy_decision_due():
             self.daten.LETZTER_ZINS_TAG = self.daten.datum
@@ -194,10 +197,7 @@ class DailySimulation:
         phase_started = perf_counter()
         self._update_crypto_lifecycle()
         self._record_phase_duration("monthly_crypto_lifecycle", phase_started)
-        phase_started = perf_counter()
-        self._update_asset_market()
-        self._record_phase_duration("monthly_asset_market", phase_started)
-        self._complete_and_advance_day()
+
         return True
 
     def _complete_and_advance_day(self) -> None:

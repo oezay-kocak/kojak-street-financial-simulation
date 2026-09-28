@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kojakstreet.ui_qt.chart_series import build_candles
+from kojakstreet.ui_qt.chart_series import build_candles, history_ordinal
 from kojakstreet.ui_qt.widgets.qt_chart import _compact_value_ticks
 
 
@@ -47,6 +47,15 @@ def test_candle_series_uses_recorded_ohlc_values_when_available() -> None:
     assert candles[0].high == 106.0
     assert candles[0].low == 99.0
     assert candles[0].close == 103.0
+    assert candles[0].date == "02.01.1990"
+
+
+def test_history_ordinal_uses_real_dates_across_irregular_buckets() -> None:
+    first = history_ordinal({"date": "1990-12-31", "resolution": "yearly"})
+    second = history_ordinal((2.0, "2026-09-21", "raw"))
+
+    assert first is not None and second is not None
+    assert second - first > 35 * 365
 
 
 def test_positioning_axis_uses_compact_value_labels() -> None:

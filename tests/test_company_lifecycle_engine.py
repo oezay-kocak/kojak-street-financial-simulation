@@ -37,6 +37,8 @@ def test_company_lifecycle_replaces_bankrupt_companies() -> None:
         runtime.daten.aktien[ticker]["cash_reserves"] = 0.0
         runtime.daten.aktien[ticker]["debt_to_market_cap"] = 1.5
         runtime.daten.aktien[ticker]["rating"] = "CC"
+        runtime.daten.aktien[ticker]["free_cash_flow"] = -10_000_000.0
+        runtime.daten.aktien[ticker]["distress_months"] = 9
 
         update_company_lifecycle(runtime.daten, lambda *item: news_items.append(item))
 

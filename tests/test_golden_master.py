@@ -14,7 +14,7 @@ def test_seeded_30_day_simulation_preserves_core_mechanics() -> None:
 
     assert signature["date"] == "1990-01-31"
     assert signature["cash"] == pytest.approx(25_000.0)
-    assert signature["history_count"] == 30
+    assert signature["history_count"] == 31
     assert int(signature["news_count"]) >= 1
     assert all(price > 0.0 for price in signature["stocks"])
     assert all(price > 0.0 for price in signature["commodities"])

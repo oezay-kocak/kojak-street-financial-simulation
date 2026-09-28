@@ -6,6 +6,8 @@ import random
 from collections.abc import Callable
 from types import ModuleType
 
+from kojakstreet.core.shocks import add_shock
+
 
 NewsCallback = Callable[[str, str], None]
 
@@ -77,6 +79,19 @@ def maybe_start_crisis_event(daten: ModuleType, add_news: NewsCallback) -> None:
         "bip_makel": event["bip_makel"],
         "typ": event["typ"],
     }
+    if event["typ"] == "ENERGIE":
+        date_key = getattr(daten, "datum", "world")
+        for code in ("CL", "TTF"):
+            add_shock(
+                daten,
+                shock_id=f"energy-embargo:{date_key}:{code}",
+                shock_type="supply",
+                target=code,
+                magnitude=-0.28,
+                duration_days=int(event["dauer"]),
+                decay="linear",
+                source="SUPPLY SHORTAGE & EMBARGO",
+            )
     add_news(
         f" ALERT - BREAKING NEWS: {event['name']}!\n\n{event_text}",
         "ROT",
