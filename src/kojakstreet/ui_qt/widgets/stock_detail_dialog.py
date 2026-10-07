@@ -57,6 +57,7 @@ from kojakstreet.ui_qt.widgets.qt_chart import FastChartView
 
 
 class StockDetailView(QFrame):
+    detail_request_changed = Signal()
     """Large broker-style stock detail sheet with fundamentals and EMA chart."""
 
     back_requested = Signal()
@@ -131,6 +132,7 @@ class StockDetailView(QFrame):
         self._fundamental_card_columns = 0
 
         self.chart_view = FastChartView(title="Price History", legend=True)
+        self._chart_dirty = False
         self.chart_view.setMinimumHeight(390)
         self.positioning_view = FastChartView(title="Long / Short Interest")
         self.positioning_view.setMinimumHeight(104)
@@ -359,11 +361,12 @@ class StockDetailView(QFrame):
         if state is not None:
             self.state = state
         self.asset_type = asset_type
-        if asset_type == "Commodity":
+        active_overview = previous_tab is self.overview_tab and same_asset
+        if asset_type == "Commodity" and active_overview:
             ensure_commodity_fundamentals(data)
-        elif asset_type == "Crypto":
+        elif asset_type == "Crypto" and active_overview:
             ensure_crypto_fundamentals(data)
-        elif asset_type == "Stock":
+        elif asset_type == "Stock" and active_overview:
             ensure_stock_fundamentals(data)
         self.ticker = ticker
         self.data = data
@@ -381,8 +384,11 @@ class StockDetailView(QFrame):
         self.header_change.setStyleSheet(f"color: {'#14b8a6' if change >= 0 else '#f43f5e'};")
         self._set_trade_controls(asset_type)
         self._update_order_value()
-        self.selected_metric_history = None
-        self.selected_metric_label = ""
+        if not same_asset:
+            self.selected_metric_history = None
+            self.selected_metric_label = ""
+        elif "visible_metric_history" in data:
+            self.selected_metric_history = list(data["visible_metric_history"])
         if asset_type == "Commodity":
             self.subtitle.setText(f"Commodity | {display_label(data.get('kategorie', ''))} | Priced in GLD")
         elif asset_type == "Crypto":
@@ -403,15 +409,19 @@ class StockDetailView(QFrame):
             self.subtitle.setText(
                 f"{display_label(data.get('land', ''))} | {display_label(data.get('branche', ''))} | Rating {data.get('rating', 'BB')}"
             )
-        self._rebuild_kpis()
-        self._rebuild_supply_chain(previous_supply_identity)
-        self._draw_positioning()
         self._configure_detail_tabs(asset_type)
+        self.kpi_frame.setVisible(asset_type not in {"Index", "Forex", "Bond", "GlobalMacro"})
         if same_asset and previous_tab in {self.chart_tab, self.overview_tab, self.supply_tab}:
             self.detail_tabs.setCurrentWidget(previous_tab)
         else:
             self.detail_tabs.setCurrentWidget(self.chart_tab)
-        if redraw_chart:
+        if self.detail_tabs.currentWidget() is self.overview_tab:
+            self._rebuild_kpis()
+        elif self.detail_tabs.currentWidget() is self.supply_tab:
+            self._rebuild_supply_chain(previous_supply_identity)
+        else:
+            self._draw_positioning()
+        if redraw_chart and self.detail_tabs.currentWidget() is self.chart_tab:
             self._draw_chart()
 
     def update_live_quote(self, data: dict[str, Any], state: GameState | None = None) -> None:
@@ -419,9 +429,11 @@ class StockDetailView(QFrame):
             self.state = state
         existing_history = self.data.get("historie", [])
         self.data = dict(data)
-        if not self.data.get("historie") and existing_history:
+        if self.detail_tabs.currentWidget() is self.chart_tab and not self.data.get("historie") and existing_history:
             self.data["historie"] = existing_history
         self.current_price = float(self.data.get("kurs", self.current_price))
+        if "visible_metric_history" in self.data:
+            self.selected_metric_history = list(self.data["visible_metric_history"])
         history = merge_history_by_date(list(self.data.get("historie", [])))
         if self.range_points > 0 and len(history) > self.range_points:
             history = history[-self.range_points :]
@@ -432,7 +444,17 @@ class StockDetailView(QFrame):
         self.header_change.setText(percent(change))
         self.header_change.setStyleSheet(f"color: {'#14b8a6' if change >= 0 else '#f43f5e'};")
         self._update_order_value()
-        self._draw_chart()
+        active_tab = self.detail_tabs.currentWidget()
+        if active_tab is self.overview_tab:
+            self._rebuild_kpis()
+        elif active_tab is self.supply_tab:
+            self._rebuild_supply_chain(self._selected_supply_identity())
+        else:
+            self._draw_positioning()
+        if active_tab is self.chart_tab:
+            self._draw_chart()
+        else:
+            self._chart_dirty = True
 
     def _configure_detail_tabs(self, asset_type: str) -> None:
         has_fundamentals = asset_type in {"Stock", "Commodity", "Crypto", "Fund", "Derivative"}
@@ -449,8 +471,15 @@ class StockDetailView(QFrame):
         )
 
     def _detail_tab_changed(self, _index: int) -> None:
+        self.detail_request_changed.emit()
         if self.detail_tabs.currentWidget() is self.overview_tab:
+            self._rebuild_kpis()
             self._layout_fundamental_cards()
+        elif self.detail_tabs.currentWidget() is self.supply_tab:
+            self._rebuild_supply_chain(self._selected_supply_identity())
+        elif self._chart_dirty:
+            self._draw_positioning()
+            self._draw_chart()
 
     def _set_trade_controls(self, asset_type: str) -> None:
         can_trade_spot = asset_type in self.SPOT_AND_PERPETUAL_ASSETS | {"Fund"} or (
@@ -482,7 +511,6 @@ class StockDetailView(QFrame):
             button.setEnabled(amount > 0.0 and self._trade_is_valid(side, amount))
 
     def _rebuild_kpis(self) -> None:
-        self._clear_fundamental_cards()
         if self.asset_type in {"Index", "Forex", "Bond", "GlobalMacro"}:
             self.kpi_frame.setVisible(False)
             return
@@ -539,7 +567,7 @@ class StockDetailView(QFrame):
                 self._fund_performance_metric("Distribution Yield", "distribution_yield", multiplier=100.0),
                 self._fund_neutral_metric("Tracked Index", str(self.data.get("tracked_index") or "-")),
                 self._fund_neutral_metric("Leverage", f"{float(self.data.get('leverage', 1.0)):g}x"),
-                self._fund_neutral_metric("Holdings", str(len(self._fund_allocation_rows()))),
+                self._fund_neutral_metric("Holdings", str(self.data.get("visible_holding_count", len(self._fund_allocation_rows())))),
             ]
         else:
             rating = normalize_rating(str(self.data.get("rating", DEFAULT_RATING)))
@@ -573,6 +601,14 @@ class StockDetailView(QFrame):
         self._build_fundamental_cards(values)
 
     def _build_fundamental_cards(self, values: list[tuple]) -> None:
+        schema = tuple(str(item[0]) for item in values)
+        if schema == getattr(self, "_fundamental_schema", None):
+            for item in values:
+                self._patch_kpi(self._kpi_value_widgets[str(item[0])], *item)
+            return
+        self._clear_fundamental_cards()
+        self._fundamental_schema = schema
+        self._kpi_value_widgets = {}
         market_labels = {"Price", "Change", "Market Cap", "Shares", "Open Interest", "AUM"}
         fundamental_labels = {
             "Revenue", "Revenue Growth", "Free Cash Flow", "FCF Margin", "EPS", "Dividend Yield",
@@ -781,7 +817,8 @@ class StockDetailView(QFrame):
             self._suppress_supply_selection = True
             selection_model = self.supply_table.selectionModel()
             selection_model.blockSignals(True)
-            self.supply_table.selectRow(target_row)
+            if self.supply_table.currentIndex().row() != target_row:
+                self.supply_table.selectRow(target_row)
             selection_model.blockSignals(False)
             self._suppress_supply_selection = False
             if selected_identity is not None:
@@ -801,6 +838,8 @@ class StockDetailView(QFrame):
         self.supply_model.set_rows(table_rows, metadata=rows)
 
     def _fund_allocation_rows(self) -> list[dict[str, Any]]:
+        if "visible_allocations" in self.data:
+            return self.data["visible_allocations"]
         rows = []
         for holding in self.data.get("underlyings", []):
             ticker = str(holding.get("ticker", ""))
@@ -906,7 +945,9 @@ class StockDetailView(QFrame):
             return
         self.selected_metric_history = list(row.get("company_qty_history", []))
         self.selected_metric_label = f"{display_label(row.get('name', row.get('code')))} | Company Qty"
-        self._draw_chart()
+        self._chart_dirty = True
+        if self.detail_tabs.currentWidget() is self.chart_tab:
+            self._draw_chart()
 
     def _selected_supply_identity(self) -> tuple[str, str] | None:
         index = self.supply_table.currentIndex()
@@ -981,18 +1022,29 @@ class StockDetailView(QFrame):
         box = QVBoxLayout()
         caption = QLabel(label.upper())
         caption.setObjectName("Muted")
-        main = QLabel(value if change is None else f"{value}  {percent(change)}")
+        main = QLabel()
         main.setObjectName("DetailValue")
         if label in {"Drivers", "Use Case", "Pricing Note"}:
             main.setWordWrap(True)
-        direction = change if change is not None else self._metric_direction(label)
-        if color is not None:
-            main.setStyleSheet(f"color: {color};")
-        elif direction is not None:
-            main.setStyleSheet(f"color: {'#14b8a6' if direction >= 0 else '#f43f5e'};")
+        self._patch_kpi(main, label, value, change, color)
+        self._kpi_value_widgets[label] = main
         box.addWidget(caption)
         box.addWidget(main)
         return box
+
+    def _patch_kpi(self, main: QLabel, label: str, value: str, change: float | None = None, color: str | None = None) -> None:
+        text = value if change is None else f"{value}  {percent(change)}"
+        if main.text() != text:
+            main.setText(text)
+        direction = change if change is not None else self._metric_direction(label)
+        if color is not None:
+            style = f"color: {color};"
+        elif direction is not None:
+            style = f"color: {'#14b8a6' if direction >= 0 else '#f43f5e'};"
+        else:
+            style = ""
+        if main.styleSheet() != style:
+            main.setStyleSheet(style)
 
     def _metric_direction(self, label: str) -> float | None:
         if label == "Price":
@@ -1056,6 +1108,7 @@ class StockDetailView(QFrame):
         return None
 
     def _draw_chart(self) -> None:
+        self._chart_dirty = False
         self.last_candle_count = 0
         history = self._history_entries()
         prices = self._history_points(history)

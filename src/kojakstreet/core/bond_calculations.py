@@ -3,6 +3,7 @@ from kojakstreet.core.accounting import convert_amount
 from kojakstreet.core.countries import RESERVE_CURRENCY
 from kojakstreet.core.history import HOT_REALIZED_EVENTS, trim_history
 from kojakstreet.core.ratings import DEFAULT_RATING, RECOVERY_RATE, default_probability
+from kojakstreet.core.player_accounting import bond_credit_uniform
 
 
 def update_laufende_anleihen(add_news_callback, daten_module=None):
@@ -65,12 +66,10 @@ def update_laufende_anleihen(add_news_callback, daten_module=None):
                     "ZENTRALBANK",
                 )
             else:
-                import random
-
                 akt_rating = daten_module.aktien.get(anl["ticker"], {}).get("rating", "D")
                 ausfall_risiko = _remaining_term_default_probability(akt_rating, anl)
 
-                if random.random() < ausfall_risiko:
+                if bond_credit_uniform(daten_module, anl) < ausfall_risiko:
                     add_news_callback(
                         f" RATING DEFAULT: Corporate bond {anl['ticker']} "
                         f"(Rating: {akt_rating}) has defaulted!\n"

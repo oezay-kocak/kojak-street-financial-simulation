@@ -1,4 +1,4 @@
-"""Compact Genesis/Established World selection and isolated generation UI."""
+"""World-start selection and isolated prehistory generation UI."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class NewSimulationDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("New Simulation")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(820)
         layout = QVBoxLayout(self)
         title = QLabel("NEW SIMULATION")
         title.setObjectName("BrandTitle")
@@ -52,9 +52,15 @@ class NewSimulationDialog(QDialog):
             "ESTABLISHED WORLD",
             "Generate a mature economy with decades of simulated history before you begin.",
         )
+        self.heterogeneous = self._mode_card(
+            "HETEROGENEOUS WORLD",
+            "Starts on Day 1 with varied country and company sizes, without pre-simulated history.",
+        )
         self.mode_group.addButton(self.genesis)
         self.mode_group.addButton(self.established)
+        self.mode_group.addButton(self.heterogeneous)
         modes.addWidget(self.genesis.parentWidget())
+        modes.addWidget(self.heterogeneous.parentWidget())
         modes.addWidget(self.established.parentWidget())
         layout.addLayout(modes)
 
@@ -64,10 +70,14 @@ class NewSimulationDialog(QDialog):
         self.seed.setValue(1729)
         self.years = QComboBox()
         self.years.addItems(["50 years", "75 years", "100 years"])
+        self.years.setPlaceholderText("No prehistory (Day 1)")
+        self._prehistory_index = 0
         form.addRow("Seed", self.seed)
         form.addRow("Prehistory", self.years)
         layout.addLayout(form)
         self.genesis.toggled.connect(self._sync_controls)
+        self.established.toggled.connect(self._sync_controls)
+        self.heterogeneous.toggled.connect(self._sync_controls)
         self._sync_controls()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create World")
@@ -89,10 +99,17 @@ class NewSimulationDialog(QDialog):
         return button
 
     def _sync_controls(self) -> None:
+        if self.heterogeneous.isChecked():
+            if self.years.currentIndex() >= 0:
+                self._prehistory_index = self.years.currentIndex()
+            self.years.setCurrentIndex(-1)
+        elif self.years.currentIndex() < 0:
+            self.years.setCurrentIndex(self._prehistory_index)
         self.years.setEnabled(self.established.isChecked())
 
     def config(self) -> WorldGenerationConfig:
-        mode = WorldMode.ESTABLISHED if self.established.isChecked() else WorldMode.GENESIS
+        mode = (WorldMode.ESTABLISHED if self.established.isChecked() else
+                WorldMode.HETEROGENEOUS if self.heterogeneous.isChecked() else WorldMode.GENESIS)
         years = int(self.years.currentText().split()[0]) if mode == WorldMode.ESTABLISHED else 0
         return WorldGenerationConfig(mode=mode, seed=self.seed.value(), prehistory_years=years).normalized()
 

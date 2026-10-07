@@ -21,9 +21,13 @@ import numpy as np
 
 from kojakstreet.core.checkpoints import SUPPORTED_VERSIONS, capture, decode, encode
 from kojakstreet.core.cryptos import TARGET_CRYPTO_COUNT
-from kojakstreet.core.history import ECONOMIC_MODEL_VERSION, HISTORY_SCHEMA_VERSION
+from kojakstreet.core.history import (
+    ECONOMIC_MODEL_VERSION,
+    HISTORY_SCHEMA_VERSION,
+    LEGACY_ECONOMIC_MODEL_VERSION,
+)
 
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 4
 BUNDLE_SCHEMA_VERSION = 1
 SUPPORTED_PREHISTORY_YEARS = (50, 75, 100)
 PLAYER_STARTING_CASH_GD = 25_000.0
@@ -31,6 +35,7 @@ PLAYER_STARTING_CASH_GD = 25_000.0
 
 class WorldMode(StrEnum):
     GENESIS = "GENESIS"
+    HETEROGENEOUS = "HETEROGENEOUS"
     ESTABLISHED = "ESTABLISHED"
 
 
@@ -49,7 +54,7 @@ class WorldGenerationConfig:
     def normalized(self) -> WorldGenerationConfig:
         mode = WorldMode(self.mode)
         years = int(self.prehistory_years)
-        if mode == WorldMode.GENESIS:
+        if mode in {WorldMode.GENESIS, WorldMode.HETEROGENEOUS}:
             years = 0
         elif years not in SUPPORTED_PREHISTORY_YEARS:
             raise ValueError(f"Established prehistory must be one of {SUPPORTED_PREHISTORY_YEARS}")
@@ -67,14 +72,19 @@ class WorldGenerationConfig:
 
     def trajectory_identity(self) -> dict[str, object]:
         """Return only inputs that may define the economic trajectory."""
-        return {
+        identity = {
             "mode": str(self.mode),
             "seed": int(self.seed),
             "prehistory_years": int(self.prehistory_years),
             "economic_model_version": self.economic_model_version,
             "history_schema_version": self.history_schema_version,
             "generator_version": self.generator_version,
+            "politics_model_version": 1,
         }
+        if self.mode == WorldMode.HETEROGENEOUS:
+            from kojakstreet.core.heterogeneous_start import INITIALIZATION_VERSION
+            identity["heterogeneous_initialization_version"] = INITIALIZATION_VERSION
+        return identity
 
 
 TAIL_THRESHOLDS = {
@@ -262,9 +272,10 @@ def validate_bundle(path: Path) -> dict[str, object]:
     if metadata.get("bundle_schema_version") != BUNDLE_SCHEMA_VERSION or metadata.get("complete") is not True:
         raise ValueError("Incomplete or unsupported world bundle")
     config = metadata.get("config", {})
-    if config.get("economic_model_version") != ECONOMIC_MODEL_VERSION:
+    legacy = config.get("economic_model_version") == LEGACY_ECONOMIC_MODEL_VERSION
+    if config.get("economic_model_version") not in {ECONOMIC_MODEL_VERSION, LEGACY_ECONOMIC_MODEL_VERSION}:
         raise ValueError("World bundle economic model version mismatch")
-    if config.get("history_schema_version") != HISTORY_SCHEMA_VERSION:
+    if config.get("history_schema_version") not in ({1} if legacy else {2, HISTORY_SCHEMA_VERSION}):
         raise ValueError("World bundle history schema version mismatch")
     for name, expected in metadata.get("files", {}).items():
         candidate = path / name

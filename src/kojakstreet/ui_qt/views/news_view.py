@@ -43,11 +43,13 @@ from kojakstreet.ui_qt.widgets.view_header import ViewHeader
 class NewsView(QFrame):
     """Read-only news and event feed."""
 
-    def __init__(self, state: GameState) -> None:
+    def __init__(self, state: GameState, scope_provider=None, calendar_provider=None) -> None:
         super().__init__()
         self.state = state
+        self.scope_provider = scope_provider
+        self.calendar_provider = calendar_provider
         self.news_items = build_news_items(state)
-        self.calendar_items = build_economic_calendar(state)
+        self.calendar_items = self._calendar_items(state)
         self._news_signature = self._state_news_signature(state)
         self._calendar_signature = self._state_calendar_signature(state)
         self.news_table: QTableView | None = None
@@ -153,9 +155,11 @@ class NewsView(QFrame):
     def _build_content(self) -> QSplitter:
         splitter = QSplitter(Qt.Orientation.Horizontal)
         tabs = QTabWidget()
+        self.tabs = tabs
         tabs.setObjectName("NewsTabs")
         tabs.addTab(self._build_calendar_table(), "Economic Calendar")
         tabs.addTab(self._build_news_table(), "Market News")
+        tabs.currentChanged.connect(lambda _index: self._sync_detail_stack())
         detail = self._build_detail_stack()
         detail.setMinimumWidth(360)
         splitter.addWidget(tabs)
@@ -252,7 +256,7 @@ class NewsView(QFrame):
         self._news_signature = signature
         self._calendar_signature = calendar_signature
         self.news_items = build_news_items(state)
-        self.calendar_items = build_economic_calendar(state)
+        self.calendar_items = self._calendar_items(state)
         for label, widget in self.kpi_values.items():
             widget.setText(self._kpi_value(label))
         self._sync_category_filter()
@@ -387,6 +391,13 @@ class NewsView(QFrame):
             self._set_calendar_detail(item)
 
     def _set_calendar_detail(self, item: EconomicCalendarItem) -> None:
+        if hasattr(self, "tabs") and self.tabs.currentIndex() != 0:
+            return
+        provider = getattr(self, "scope_provider", None)
+        if provider is not None and getattr(self, "_scope_history", None) != item.history_key:
+            self.state = provider({"view": "news", "selection": {"history_key": item.history_key}})
+            self._scope_history = item.history_key
+            item = next((row for row in self._calendar_items(self.state) if row.history_key == item.history_key), item)
         self.calendar_detail_title.setText(f"{item.country}  {item.indicator}")
         surprise = "-" if item.surprise is None else _calendar_value(item.surprise)
         self.calendar_detail_meta.setText(
@@ -403,7 +414,15 @@ class NewsView(QFrame):
     def _sync_detail_stack(self) -> None:
         if self.detail_stack is None:
             return
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == 0 and self.calendar_table is not None:
+            self._show_calendar_detail(self.calendar_table.currentIndex().row())
+            return
         self.detail_stack.setCurrentIndex(1 if self.news_items else 0)
+
+    def _calendar_items(self, state):
+        if self.calendar_provider is not None:
+            return self.calendar_provider()
+        return build_economic_calendar(state)
 
     def _selected_news_key(self) -> tuple[str, str] | None:
         if self.news_table is None:
@@ -438,7 +457,8 @@ class NewsView(QFrame):
                 target_row = row
                 break
         self.news_model.ensure_row_loaded(target_row)
-        self.news_table.selectRow(target_row)
+        if self.news_table.currentIndex().row() != target_row:
+            self.news_table.selectRow(target_row)
         news_item = self.news_model.index(target_row, 0).data(METADATA_ROLE)
         if isinstance(news_item, NewsItem):
             self._set_detail(news_item)
@@ -453,7 +473,8 @@ class NewsView(QFrame):
                 target_row = row
                 break
         self.calendar_model.ensure_row_loaded(target_row)
-        self.calendar_table.selectRow(target_row)
+        if self.calendar_table.currentIndex().row() != target_row:
+            self.calendar_table.selectRow(target_row)
 
     def _sync_category_filter(self) -> None:
         if self.category_filter is None:

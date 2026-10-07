@@ -7,6 +7,7 @@ import random
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -44,6 +45,11 @@ from kojakstreet.core.simulation import DailySimulation
 from kojakstreet.core.simulation_state import SimulationState
 from kojakstreet.core.state import GameState
 from kojakstreet.core.trading_service import TradingService
+from kojakstreet.core.workforce import initialize as initialize_workforce
+from kojakstreet.core.politics import initialize as initialize_politics
+
+if TYPE_CHECKING:
+    from kojakstreet.core.established_world import WorldGenerationConfig
 
 
 class IntegratedRuntime:
@@ -56,10 +62,25 @@ class IntegratedRuntime:
         data_dir: Path | None = None,
         seed: int | None = None,
         flush_interval_days: int = 30,
+        world_config: "WorldGenerationConfig | None" = None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
+        roots = None
+        if world_config is not None:
+            from kojakstreet.core.established_world import WorldMode
+            world_config = world_config.normalized()
+            if seed is not None and int(seed) != world_config.seed:
+                raise ValueError("Runtime seed does not match world configuration")
+            seed = world_config.seed
+            if world_config.mode == WorldMode.ESTABLISHED:
+                raise ValueError("Established worlds must use the existing prehistory generator")
+            if world_config.mode == WorldMode.HETEROGENEOUS:
+                from kojakstreet.core.companies import BRANCHEN
+                from kojakstreet.core.countries import COUNTRY_SYMBOLS
+                from kojakstreet.core.heterogeneous_start import generate_roots
+                roots = generate_roots(seed, list(COUNTRY_SYMBOLS), BRANCHEN)
         if seed is not None:
             random.seed(int(seed))
             np.random.seed(int(seed))
@@ -68,7 +89,15 @@ class IntegratedRuntime:
         for key in list(vars(daten)):
             if not key.startswith("__"):
                 delattr(daten, key)
-        daten = importlib.reload(daten)
+        if roots is None:
+            daten = importlib.reload(daten)
+        else:
+            from kojakstreet.core.heterogeneous_start import initialization_roots
+            token = initialization_roots.set(roots)
+            try:
+                daten = importlib.reload(daten)
+            finally:
+                initialization_roots.reset(token)
         self.daten = daten
         self.state = SimulationState.from_legacy(daten)
         if seed is not None:
@@ -87,11 +116,25 @@ class IntegratedRuntime:
         self._mark_pyside_runtime()
         ensure_country_financials(self.state)
         ensure_macro_expectations(self.state)
-        self._ensure_market_fundamentals()
+        self._ensure_market_fundamentals(preserve_company_identifiers=roots is not None)
         ensure_global_macro(self.state)
         attach_stable_label_codes(self.state)
         update_market_regime(self.state)
         ensure_dynamic_bond_market(self.state)
+        if roots is not None:
+            from kojakstreet.core.heterogeneous_start import (
+                finalize_initialization,
+                validate_saved_initialization,
+            )
+            finalize_initialization(self.state)
+            # Persist reproducible generation inputs, not a new session's
+            # wall-clock timestamp or randomly allocated presentation identity.
+            self.daten.world_generation = {
+                **world_config.trajectory_identity(), "world_name": world_config.world_name,
+            }
+            validate_saved_initialization(self.daten.world_generation, seed)
+        initialize_workforce(self.state, seed=int(seed or 0), heterogeneous=roots is not None, force=True)
+        initialize_politics(self.state, seed=int(seed or 0), heterogeneous=roots is not None)
         self.data_dir = Path(data_dir or os.environ.get("KOJAKSTREET_DATA_DIR", project_root / ".cache"))
         self.save_path = self.data_dir / "spielstand.dat"
         self.data_store = EconomicDataStore(
@@ -369,6 +412,11 @@ class IntegratedRuntime:
         return self.snapshot()
 
     def advance_day(self) -> None:
+        self.data_store.check_persistence_health()
+        if not self.daten.SPIEL_AKTIV:
+            self.running = False
+            self.daten.spiel_pausiert = True
+            return
         previous_running = self.running
         self.daten.spiel_pausiert = False
         gc_was_enabled = gc.isenabled()
@@ -380,6 +428,9 @@ class IntegratedRuntime:
         finally:
             if gc_was_enabled:
                 gc.enable()
+        if not self.daten.SPIEL_AKTIV:
+            self.running = False
+            return
         if previous_running:
             self.daten.spiel_pausiert = False
         self.running = previous_running
@@ -400,14 +451,20 @@ class IntegratedRuntime:
     def load_game(self) -> GameState:
         import speicher
 
+        self.data_store.wait_for_persistence()
         checkpoint = speicher.spiel_laden(self.save_path)
         self.state.sync_from_legacy()
+        self._activate_loaded_workforce()
+        self._activate_loaded_politics()
         if not checkpoint:
             self._ensure_market_fundamentals()
             ensure_global_macro(self.state)
             attach_stable_label_codes(self.state)
             update_market_regime(self.state)
             ensure_dynamic_bond_market(self.state)
+            from kojakstreet.core.workforce import aggregate
+
+            aggregate(self.state, force=True)
         self.running = False
         self.daten.spiel_pausiert = True
         analytics = checkpoint.get("analytics_session", {}) if checkpoint else {}
@@ -436,10 +493,13 @@ class IntegratedRuntime:
         payload = read_compressed_checkpoint(bundle_path / "checkpoint.json.gz")
         restore(self.daten, payload)
         self.state.sync_from_legacy()
+        self._activate_loaded_workforce()
+        self._activate_loaded_politics()
         self.data_store.restore_checkpoint_session(payload["analytics_session"])
         self.running = False
         self.daten.spiel_pausiert = True
         self.market.warm_runtime_indexes()
+        self.data_store.record_day(self.state, current_scope="full")
         return self.snapshot()
 
     def trade_spot(self, ticker: str, quantity: float, side: str) -> GameState:
@@ -467,8 +527,43 @@ class IntegratedRuntime:
         self.daten.PYSIDE_RUNTIME = True
         self.daten.CHART_REFFS = {}
 
-    def _ensure_market_fundamentals(self) -> None:
-        ensure_company_universe(self.state)
+    def _activate_loaded_workforce(self) -> None:
+        if initialize_workforce(self.state, legacy=True):
+            from kojakstreet.core.history import ECONOMIC_MODEL_VERSION
+
+            metadata = getattr(self.daten, "world_generation", None)
+            if isinstance(metadata, dict):
+                # Original generator identity describes the historical world;
+                # activation is a separate, explicit provenance transition.
+                metadata["active_economic_model_version"] = ECONOMIC_MODEL_VERSION
+                metadata["workforce_activated_on"] = self.daten.datum.date().isoformat()
+
+    def _activate_loaded_politics(self) -> None:
+        if initialize_politics(self.state, seed=int(getattr(self.daten, "simulation_seed", 0)), legacy=True):
+            metadata = getattr(self.daten, "world_generation", None)
+            if isinstance(metadata, dict):
+                metadata["politics_activated_on"] = self.daten.datum.date().isoformat()
+
+
+    def workforce_history_points(self, region: str, metric: str, limit: int = 0) -> list[dict]:
+        from kojakstreet.core.workforce import POOLS
+
+        allowed = {"population_growth_annualized"} | {
+            f"{pool}_{name}" for pool in POOLS for name in ("supply", "demand", "coverage", "shortage")
+        }
+        if metric not in allowed:
+            raise ValueError("Unknown workforce history metric")
+        semantic = "level" if metric.endswith(("_supply", "_demand")) else "rate"
+        return self.data_store.history_series(
+            "country_workforce_monthly", "region", region, metric,
+            from_date=(self.daten.datum - timedelta(days=limit)) if limit > 0 else None,
+            pixel_budget=1200 if limit <= 0 else limit, semantic_type=semantic,
+        )
+
+    def _ensure_market_fundamentals(self, *, preserve_company_identifiers: bool = False) -> None:
+        # New roots are applied before downstream books. Preserve their already
+        # aligned identifiers rather than invalidating those books on warm-up.
+        ensure_company_universe(self.state, align_names=not preserve_company_identifiers)
         ensure_processed_products(self.state)
         ensure_population(self.state)
         ensure_country_economies(self.state)

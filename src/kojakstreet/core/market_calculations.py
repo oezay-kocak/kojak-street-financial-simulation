@@ -623,9 +623,7 @@ def _update_open_interest(
     asset_type: str,
     chance: float,
 ) -> dict[str, float | str]:
-    price = max(0.01, float(asset.get("kurs", 100.0)))
     market_size = _open_interest_market_size(asset, asset_type)
-    positioned = _perpetual_position_interest(daten_module, ticker, price)
     crypto = asset_type == "Crypto"
     decay = 0.88 if crypto else 0.92
     base_long = 0.035 if crypto else 0.020
@@ -641,8 +639,6 @@ def _update_open_interest(
     crowding = max(-1.0, min(1.0, (chance - 0.50) * 4.0 + momentum * 1.4))
     long_interest += market_size * (flow_long + max(0.0, crowding) * crowding_long)
     short_interest += market_size * (flow_short + max(0.0, -crowding) * crowding_short)
-    long_interest += positioned["LONG"]
-    short_interest += positioned["SHORT"]
     long_interest = max(0.0, min(market_size * interest_cap, long_interest))
     short_interest = max(0.0, min(market_size * interest_cap, short_interest))
     open_interest = long_interest + short_interest
@@ -674,17 +670,6 @@ def _open_interest_market_size(asset: dict, asset_type: str) -> float:
     if asset_type == "Stock":
         return max(1.0, float(asset.get("market_cap", float(asset.get("kurs", 100.0)) * 10_000_000.0)))
     return max(1.0, float(asset.get("market_cap", float(asset.get("kurs", 100.0)) * 10_000_000.0)))
-
-
-def _perpetual_position_interest(daten_module, ticker: str, price: float) -> dict[str, float]:
-    totals = {"LONG": 0.0, "SHORT": 0.0}
-    for position in getattr(daten_module, "perpetuals", {}).values():
-        if str(position.get("ticker", "")) != ticker:
-            continue
-        direction = str(position.get("typ", "")).upper()
-        if direction in totals:
-            totals[direction] += abs(float(position.get("groesse", 0.0))) * price
-    return totals
 
 
 def _squeeze_pressure(

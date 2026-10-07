@@ -20,14 +20,15 @@ from PySide6.QtWidgets import (
 )
 
 from kojakstreet.adapters.legacy_state import UI_HISTORY_LIMIT
+from kojakstreet.core.market_data_service import MarketDataService
 from kojakstreet.core.state import GameState
-from kojakstreet.ui_qt.chart_series import merge_history_by_date
 from kojakstreet.ui_qt.chart_history_cache import (
     ChartHistoryCache,
     ChartHistoryKey,
     history_key,
     point_budget,
 )
+from kojakstreet.ui_qt.chart_series import incremental_history, merge_history_by_date
 from kojakstreet.ui_qt.display import display_label
 from kojakstreet.ui_qt.models.market_table_model import MarketFilterProxyModel, MarketTableModel
 from kojakstreet.ui_qt.table_performance import optimize_table_view
@@ -44,11 +45,15 @@ class MarketsView(QFrame):
         state: GameState,
         trade_handler: Callable[[str, str, str, float, int], None] | None = None,
         history_provider: Callable[[str, str, int], list] | None = None,
+        scope_provider: Callable[[dict], GameState] | None = None,
     ) -> None:
         super().__init__()
         self.state = state
+        self._history_date = state.date
         self.trade_handler = trade_handler
         self.history_provider = history_provider
+        self.scope_provider = scope_provider
+        self._selection_scope = None
         self.history_cache = ChartHistoryCache(max_entries=32)
         self._active_history_key: ChartHistoryKey | None = None
         self.chart_panel: AssetChartPanel | None = None
@@ -60,6 +65,7 @@ class MarketsView(QFrame):
         self._stock_detail_view: StockDetailView | None = None
         self.watchlist = self._build_watchlist()
         self.model = MarketTableModel(state, self.watchlist)
+        self._prepare_local_histories()
         self.proxy_model = MarketFilterProxyModel()
         self.proxy_model.setSourceModel(self.model)
         self.live_chart_ticker: str | None = None
@@ -95,6 +101,7 @@ class MarketsView(QFrame):
             self._stock_detail_view = StockDetailView(state=self.state)
             self._stock_detail_view.back_requested.connect(self._show_market_list)
             self._stock_detail_view.chart_request_changed.connect(self._refresh_detail_history)
+            self._stock_detail_view.detail_request_changed.connect(self._refresh_detail_scope)
             if self.trade_handler is not None:
                 self._stock_detail_view.trade_requested.connect(self.trade_handler)
             self.pages.addWidget(self._stock_detail_view)
@@ -200,6 +207,8 @@ class MarketsView(QFrame):
         self._show_index_with_chart_mode(current, redraw_chart=True)
 
     def _show_index_with_chart_mode(self, current: QModelIndex, *, redraw_chart: bool) -> None:
+        if self.pages.count() and self.pages.currentWidget() is not self.main_page:
+            return
         if not current.isValid():
             return
         source_index = self.proxy_model.mapToSource(current)
@@ -238,6 +247,7 @@ class MarketsView(QFrame):
 
     def _show_market_list(self) -> None:
         self.pages.setCurrentWidget(self.main_page)
+        self._refresh_preview_history()
 
     def refresh(
         self,
@@ -247,7 +257,10 @@ class MarketsView(QFrame):
         preserve_live_history: bool = True,
     ) -> None:
         selected_ticker = self._selected_ticker()
-        if preserve_live_history:
+        selected_type = self._selected_row_asset_type()
+        if self._accept_history_date(state):
+            preserve_live_history = False
+        if preserve_live_history and self.scope_provider is None:
             self._merge_local_history_into_state(state)
         self.state = state
         if self.chart_panel is not None:
@@ -257,6 +270,7 @@ class MarketsView(QFrame):
             self.market_table.setUpdatesEnabled(False)
         try:
             shape_changed = self.model.refresh(state, self.watchlist, emit_changes=False)
+            self._prepare_local_histories()
             self._populate_filter_options(preserve_current=True)
             if shape_changed:
                 self.proxy_model.refilter(keep_loaded=True)
@@ -269,13 +283,17 @@ class MarketsView(QFrame):
                 and not throttle_charts
                 and (self.type_filter is None or self.type_filter.currentText() != "Funds and ETFs")
             )
-            self._select_ticker(selected_ticker, redraw_chart=should_redraw_chart)
+            self._select_ticker(
+                selected_ticker, redraw_chart=should_redraw_chart, asset_type=selected_type
+            )
             if (
                 self._stock_detail_view is not None
                 and self.pages.currentWidget() is self._stock_detail_view
                 and self._stock_detail_view.ticker
             ):
-                source_row = self.model.row_for_ticker(self._stock_detail_view.ticker)
+                source_row = self.model.row_for_asset(
+                    self._stock_detail_view.ticker, self._stock_detail_view.asset_type
+                )
                 row = self.model.rows[source_row]
                 if row["asset_type"] in {"Stock", "Commodity", "Crypto", "Fund", "Index", "Derivative"}:
                     self._stock_detail_view.update_asset(
@@ -293,21 +311,49 @@ class MarketsView(QFrame):
             if self.market_table is not None:
                 self.market_table.setUpdatesEnabled(True)
 
-    def apply_live_quotes(self, quotes: list[dict], *, date_text: str | None = None) -> None:
+    def apply_live_quotes(
+        self, quotes: list[dict], *, date_text: str | None = None,
+        current_state: GameState | None = None,
+    ) -> None:
+        self._accept_history_date(current_state or self.state)
         selected_ticker = self._selected_ticker()
+        selected_type = self._selected_row_asset_type()
         live_date = date_text or self.state.date.isoformat()
-        self._append_live_history(quotes, live_date)
-        for quote in quotes:
-            self.history_cache.update_live(
-                str(quote.get("asset_type", "")),
-                str(quote.get("ticker", "")),
-                (float(quote.get("price", 0.0)), live_date, "Live"),
-            )
+        if selected_ticker is None and self.pages.currentWidget() is self.main_page and self.chart_panel is not None and self.chart_panel.current_asset:
+            selected_ticker = self.chart_panel.current_asset[0]
+            selected_type = self.chart_panel.current_asset[1]
+        if current_state is not None:
+            self.state = current_state
+            books = dict(MarketDataService(current_state).asset_books())
+            self.history_cache.update_current_books(books)
+            # Indices retain their own identity across stock-symbol collisions.
+            resolved = {}
+            for kind, book in books.items():
+                for ticker in book:
+                    resolved.setdefault(str(ticker), kind)
+            shape = {(kind, ticker) for ticker, kind in resolved.items()}
+            shape.update(("Index", str(ticker)) for ticker in books.get("Index", {}))
+            if (shape != set(self.model._row_lookup)
+                    or len(self.model.rows) != sum(len(book) for book in books.values())):
+                self.refresh(current_state, preserve_live_history=False)
+                return
+            # The process delta already appended the exact OHLC/current fields.
+            # Keep row dictionaries UI-owned; never normalize the wire baseline.
+            for row in self.model.rows:
+                row["data"] = dict(books[row["asset_type"]][row["ticker"]])
+        else:
+            self._append_live_history(quotes, live_date)
+            for quote in quotes:
+                self.history_cache.update_live(
+                    str(quote.get("asset_type", "")),
+                    str(quote.get("ticker", "")),
+                    (float(quote.get("price", 0.0)), live_date, "Live"),
+                )
         changed_rows = self.model.apply_quote_rows(quotes, self.watchlist)
         if changed_rows:
             self._emit_visible_market_rows()
         if selected_ticker and self.pages.currentWidget() is self.main_page:
-            source_row = self.model.row_for_ticker(selected_ticker)
+            source_row = self.model.row_for_asset(selected_ticker, selected_type)
             row = self.model.rows[source_row]
             if self.chart_panel is not None:
                 self.chart_panel.update_live_quote(
@@ -318,12 +364,27 @@ class MarketsView(QFrame):
             and self.pages.currentWidget() is self._stock_detail_view
             and self._stock_detail_view.ticker
         ):
-            source_row = self.model.row_for_ticker(self._stock_detail_view.ticker)
+            source_row = self.model.row_for_asset(
+                self._stock_detail_view.ticker, self._stock_detail_view.asset_type
+            )
             row = self.model.rows[source_row]
             self._stock_detail_view.update_live_quote(
                 self._data_with_history(row, redraw_chart=False, panel=self._stock_detail_view),
                 self.state,
             )
+
+    def _accept_history_date(self, state: GameState) -> bool:
+        rewound = state.date < self._history_date
+        if rewound:
+            self.history_cache = ChartHistoryCache(max_entries=32)
+            self._active_history_key = None
+        self._history_date = state.date
+        return rewound
+
+    def _prepare_local_histories(self) -> None:
+        for row in self.model.rows:
+            data = row["data"] = dict(row["data"])
+            data["historie"] = incremental_history(data.get("historie", []))
 
     def _append_live_history(self, quotes: list[dict], date_text: str) -> None:
         for quote in quotes:
@@ -336,8 +397,9 @@ class MarketsView(QFrame):
             if row["ticker"] != ticker or row["asset_type"] != asset_type:
                 continue
             point = (float(quote.get("price", 0.0)), date_text, "Live")
-            history = row["data"].setdefault("historie", [])
-            history[:] = merge_history_by_date(history, [point])[-UI_HISTORY_LIMIT:]
+            history = incremental_history(row["data"].get("historie", []))
+            row["data"]["historie"] = history
+            history.append_point(point, limit=UI_HISTORY_LIMIT)
 
     def _merge_local_history_into_state(self, state: GameState) -> None:
         books = {
@@ -367,14 +429,26 @@ class MarketsView(QFrame):
         source = self.proxy_model.mapToSource(current)
         return self.model.rows[source.row()]["ticker"]
 
-    def _select_ticker(self, ticker: str | None, *, redraw_chart: bool = True) -> None:
+    def _selected_row_asset_type(self) -> str | None:
+        if self.market_table is None:
+            return None
+        current = self.market_table.currentIndex()
+        if not current.isValid():
+            return None
+        source = self.proxy_model.mapToSource(current)
+        return self.model.rows[source.row()]["asset_type"] if source.isValid() else None
+
+    def _select_ticker(
+        self, ticker: str | None, *, redraw_chart: bool = True, asset_type: str | None = None
+    ) -> None:
         if self.market_table is None or self.proxy_model.rowCount() == 0:
             return
         current = self.market_table.currentIndex()
-        if current.isValid() and self._selected_ticker() == ticker:
+        if (current.isValid() and self._selected_ticker() == ticker
+                and (asset_type is None or self._selected_row_asset_type() == asset_type)):
             self._show_index_with_chart_mode(current, redraw_chart=redraw_chart)
             return
-        source_row = self.model.row_for_ticker(ticker)
+        source_row = self.model.row_for_asset(ticker, asset_type)
         proxy_index = self.proxy_model.mapFromSource(self.model.index(source_row, 0))
         if not proxy_index.isValid():
             proxy_index = self.proxy_model.index(0, 0)
@@ -385,6 +459,25 @@ class MarketsView(QFrame):
         self._show_index_with_chart_mode(proxy_index, redraw_chart=redraw_chart)
 
     def _data_with_history(self, row: dict, *, redraw_chart: bool, panel=None) -> dict:
+        if self.scope_provider is not None:
+            tab = "chart"
+            if isinstance(panel, StockDetailView) and panel.ticker == row["ticker"]:
+                if panel.detail_tabs.currentWidget() is panel.overview_tab:
+                    tab = "overview"
+                elif panel.detail_tabs.currentWidget() is panel.supply_tab:
+                    tab = "supply"
+            scope = {"view": "markets", "selection": {"kind": row["asset_type"], "ticker": row["ticker"], "tab": tab}}
+            if tab == "chart" and isinstance(panel, StockDetailView) and panel.ticker == row["ticker"]:
+                identity = panel._selected_supply_identity()
+                if identity:
+                    scope["selection"]["supply_metric"] = list(identity)
+            if scope != self._selection_scope:
+                self.state = self.scope_provider(scope)
+                self._selection_scope = scope
+                books = dict(MarketDataService(self.state).asset_books())
+                row["data"] = dict(books[row["asset_type"]][row["ticker"]])
+                if self.chart_panel is not None:
+                    self.chart_panel.set_state(self.state)
         data = row["data"]
         range_points = int(getattr(panel, "range_points", 132))
         local_history = merge_history_by_date(list(data.get("historie", [])))
@@ -402,7 +495,9 @@ class MarketsView(QFrame):
             self._active_history_key = key
             cached = self.history_cache.get(key)
             history = merge_history_by_date(list(cached or []), local_history)
-            requested = self.history_provider is not None and redraw_chart
+            requested = self.history_provider is not None and redraw_chart and (
+                not isinstance(panel, StockDetailView) or panel.detail_tabs.currentWidget() is panel.chart_tab
+            )
             if requested:
                 fresh = self.history_provider(
                     row["asset_type"], row["ticker"], point_budget(range_points)
@@ -445,7 +540,9 @@ class MarketsView(QFrame):
     def _refresh_detail_history(self) -> None:
         if self._stock_detail_view is None or not self._stock_detail_view.ticker:
             return
-        source_row = self.model.row_for_ticker(self._stock_detail_view.ticker)
+        source_row = self.model.row_for_asset(
+            self._stock_detail_view.ticker, self._stock_detail_view.asset_type
+        )
         row = self.model.rows[source_row]
         self._stock_detail_view.update_asset(
             row["ticker"],
@@ -453,6 +550,14 @@ class MarketsView(QFrame):
             row["asset_type"],
             self.state,
         )
+
+    def _refresh_detail_scope(self) -> None:
+        if self.scope_provider is None or self._stock_detail_view is None or not self._stock_detail_view.ticker:
+            return
+        detail = self._stock_detail_view
+        row = self.model.rows[self.model.row_for_asset(detail.ticker, detail.asset_type)]
+        data = self._data_with_history(row, redraw_chart=False, panel=detail)
+        detail.update_live_quote(data, self.state)
 
     def apply_filters(self, _value: object = None, *, restore_sort: bool = True) -> None:
         if self.search_input is None or self.type_filter is None or self.region_filter is None or self.group_filter is None:
@@ -534,6 +639,8 @@ class MarketsView(QFrame):
         self._replace_combo_options(self.group_filter, group_options, current_group)
 
     def _replace_combo_options(self, combo: QComboBox, options: list[tuple[str, str]], current: object) -> None:
+        if [(combo.itemText(i), combo.itemData(i)) for i in range(combo.count())] == options:
+            return
         combo.blockSignals(True)
         combo.clear()
         for text, value in options:

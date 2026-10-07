@@ -99,20 +99,19 @@ def test_qt_shell_top_bar_uses_cash_and_ticker_tape_only() -> None:
     assert window.top_bar.ticker_tape.minimumSizeHint().width() <= 300
 
 
-def test_qt_shell_top_bar_defers_ticker_data_until_next_cycle() -> None:
+def test_qt_shell_top_bar_applies_current_ticker_data_immediately() -> None:
     app = QApplication.instance() or QApplication([])
     state = snapshot_from_legacy(daten)
 
     window = KojakStreetWindow(state)
-    first_items = window.top_bar.ticker_tape.items
     next_items = [{"ticker": "NEXT", "price": 101.0, "change": 2.5}]
 
     assert app is not None
 
     window.top_bar.ticker_tape.set_items(next_items)
 
-    assert window.top_bar.ticker_tape.items is first_items
-    assert window.top_bar.ticker_tape.pending_items == next_items
+    assert window.top_bar.ticker_tape.items == next_items
+    assert window.top_bar.ticker_tape.pending_items is None
 
     window.top_bar.ticker_tape.offset = window.top_bar.ticker_tape._tile_width() - 1
     window.top_bar.ticker_tape.scroll()
@@ -265,6 +264,7 @@ def test_qt_stock_detail_shows_company_supply_chain_rows() -> None:
 
     window = KojakStreetWindow(state)
     window.markets_view.stock_detail_view.update_asset(ticker, stock, "Stock", state)
+    window.markets_view.stock_detail_view.detail_tabs.setCurrentWidget(window.markets_view.stock_detail_view.supply_tab)
     table = window.markets_view.stock_detail_view.supply_table
 
     assert app is not None
@@ -285,6 +285,7 @@ def test_qt_stock_detail_resolves_processed_product_market_rows_from_markets_pro
     window = KojakStreetWindow(state)
     detail = window.markets_view.stock_detail_view
     detail.update_asset(ticker, stock, "Stock", state)
+    detail.detail_tabs.setCurrentWidget(detail.supply_tab)
     rows = [detail.supply_table.model().metadata_at(index) for index in range(detail.supply_table.model().rowCount())]
     produced = next(row for row in rows if row["role"] == "Produces" and row["code"] in state.processed_products)
 
@@ -302,6 +303,7 @@ def test_qt_stock_supply_chain_chart_has_no_ema_and_preserves_selected_row() -> 
     window = KojakStreetWindow(state)
     detail = window.markets_view.stock_detail_view
     detail.update_asset(ticker, stock, "Stock", state)
+    detail.detail_tabs.setCurrentWidget(detail.supply_tab)
     table = detail.supply_table
 
     assert app is not None

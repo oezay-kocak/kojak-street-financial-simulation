@@ -85,13 +85,10 @@ def ensure_crypto_universe(daten: ModuleType, *, reset: bool = False) -> list[st
 def _trim_excess_universe(daten: ModuleType) -> None:
     while len(daten.kryptos) > TARGET_CRYPTO_COUNT:
         counts = _task_counts(daten.kryptos)
-        held = set(getattr(daten, "depot", {})) | {
-            str(position.get("ticker", "")) for position in getattr(daten, "perpetuals", {}).values()
-        }
         candidates = [
             (ticker, asset)
             for ticker, asset in daten.kryptos.items()
-            if ticker not in held and counts.get(str(asset.get("task_type", "")), 0) > MIN_CHAINS_PER_TASK
+            if counts.get(str(asset.get("task_type", "")), 0) > MIN_CHAINS_PER_TASK
         ]
         if not candidates:
             break
@@ -100,6 +97,7 @@ def _trim_excess_universe(daten: ModuleType) -> None:
             key=lambda item: (float(item[1].get("market_share", 0.0)), float(item[1].get("kurs", 0.0)), item[0]),
         )
         daten.kryptos.pop(ticker, None)
+        _delist_player_chain(daten, ticker)
         for fund in getattr(daten, "fonds", {}).values():
             if isinstance(fund.get("underlyings"), list):
                 fund["underlyings"] = [entry for entry in fund["underlyings"] if str(entry.get("ticker", "")) != ticker]
@@ -146,10 +144,7 @@ def shutdown_and_replace_crypto_chains(daten: ModuleType) -> list[tuple[str, str
         if history_len > 90 and (weak_price or (weak_share and weak_demand)):
             removed.append((ticker, str(asset.get("name", ticker))))
             daten.kryptos.pop(ticker, None)
-            daten.depot.pop(ticker, None)
-            for key, position in list(getattr(daten, "perpetuals", {}).items()):
-                if position.get("ticker") == ticker:
-                    daten.perpetuals.pop(key, None)
+            _delist_player_chain(daten, ticker)
     for task_code in CRYPTO_TASK_TYPES:
         while _task_counts(daten.kryptos).get(task_code, 0) < MIN_CHAINS_PER_TASK:
             ticker = _unique_ticker(daten.kryptos)
@@ -159,6 +154,15 @@ def shutdown_and_replace_crypto_chains(daten: ModuleType) -> list[tuple[str, str
         ticker = _unique_ticker(daten.kryptos)
         daten.kryptos[ticker] = _new_crypto_asset(ticker, task_code, len(daten.kryptos))
     return removed
+
+
+def _delist_player_chain(daten: ModuleType, ticker: str) -> None:
+    frame = getattr(daten, "_player_day_frame", None)
+    if frame is not None:
+        frame.events.append(("crypto_delist", ticker))
+    else:
+        from kojakstreet.core.player_accounting import remove_player_assets
+        remove_player_assets(daten, {ticker})
 
 
 def ensure_crypto_fundamentals(asset: dict) -> None:

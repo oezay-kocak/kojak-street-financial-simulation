@@ -15,10 +15,12 @@ from kojakstreet.core.history import ECONOMIC_MODEL_VERSION, SemanticType
 from kojakstreet.core.macro_calculations import update_sovereign_ratings
 from kojakstreet.core.market_calculations import ALL_SECTORS, _stock_index_members
 from kojakstreet.core.ratings import DEFAULT_RATING, rating_spread
+from kojakstreet.core.workforce import advance_population, integrate_coarse
+from kojakstreet.core.politics import advance_coarse as advance_politics, macro_snapshot
 
 MONTHLY_HISTORY_YEARS = 19
 DAILY_BURN_IN_DAYS = 365
-FAST_HISTORY_VERSION = 2
+FAST_HISTORY_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +76,9 @@ def generate_coarse_history(
     for resolution, dates in (("yearly", yearly_dates), ("monthly", monthly_dates)):
         for bucket_end in dates:
             elapsed_years = max(1.0 / 365.0, (bucket_end - previous).days / 365.2425)
+            before_politics = {c: macro_snapshot(m) for c, m in state.makro.items()}
             _advance_correlated_state(state, seed, bucket_end, elapsed_years)
+            advance_politics(state, previous, bucket_end, before_politics)
             bucket_start = date(bucket_end.year, 1, 1) if resolution == "yearly" else date(bucket_end.year, bucket_end.month, 1)
             _capture_bucket(state, resolution, bucket_start, bucket_end, buckets)
             previous = bucket_end
@@ -113,6 +117,9 @@ def generate_coarse_history(
 
 
 def _advance_correlated_state(state: Any, seed: int, when: date, dt: float) -> None:
+    before_population = {c: m["bevoelkerung"] for c, m in state.makro.items()}
+    before_companies = {t: (a["revenue"], a["production_capacity"], a.get("cash_reserves", 0.0))
+                        for t, a in state.aktien.items()}
     previous_prices = _composite_underlying_prices(state)
     previous_stock_caps = {
         str(ticker): max(0.0, float(asset.get("market_cap", 0.0)))
@@ -123,9 +130,7 @@ def _advance_correlated_state(state: Any, seed: int, when: date, dt: float) -> N
     for region, macro in state.makro.items():
         base = 0.012 + _uniform(seed, when, f"country:{region}:trend", -0.004, 0.018)
         growth = _clamp(base * dt + global_cycle + _normal(seed, when, f"country:{region}", 0.0, 0.008) * math.sqrt(dt), -0.12, 0.16)
-        population_growth = _clamp(0.004 + _uniform(seed, when, f"population:{region}", -0.006, 0.012), -0.01, 0.025)
         macro["bip_abs"] = max(100.0, float(macro.get("bip_abs", 5000.0)) * (1.0 + growth))
-        macro["bevoelkerung"] = max(100_000.0, float(macro.get("bevoelkerung", 20_000_000.0)) * (1.0 + population_growth * dt))
         inflation = _clamp(float(macro.get("inflation", 0.02)) * 0.82 + (0.018 + global_cycle * 0.25) * 0.18, -0.01, 0.12)
         rate = _clamp(float(macro.get("zins", 0.035)) * 0.80 + (inflation + 0.012) * 0.20, 0.0, 0.18)
         macro["inflation"] = inflation
@@ -142,6 +147,7 @@ def _advance_correlated_state(state: Any, seed: int, when: date, dt: float) -> N
             0.22,
         )
         macro["arbeitslosigkeit"] = unemployment
+        advance_population(macro, dt, floor=100_000.0, when=when)
         macro["expected_growth"] = annual_growth
         macro["expected_inflation"] = inflation
         macro["expected_rate"] = rate
@@ -191,7 +197,11 @@ def _advance_correlated_state(state: Any, seed: int, when: date, dt: float) -> N
         revenue_factor = max(0.72, 1.0 + fundamental * 0.65 + company * 0.35)
         price_factor = max(0.55, 1.0 + fundamental + company)
         asset["revenue"] = max(1.0, float(asset.get("revenue", 1.0)) * revenue_factor)
-        margin = _clamp(float(asset.get("free_cash_flow_margin", 0.08)) + company * 0.08, -0.08, 0.30)
+        # Workforce changes the margin's level, not its random-walk baseline.
+        # Feeding the adjusted level back here would add the full health term
+        # again at every coarse bucket and double-count persistent mismatch.
+        margin = _clamp(float(asset.get("_workforce_coarse_base_margin",
+                                        asset.get("free_cash_flow_margin", 0.08))) + company * 0.08, -0.08, 0.30)
         asset["free_cash_flow_margin"] = margin
         asset["fcf_margin"] = margin
         asset["free_cash_flow"] = float(asset["revenue"]) * margin
@@ -213,6 +223,8 @@ def _advance_correlated_state(state: Any, seed: int, when: date, dt: float) -> N
         )
         asset["debt_to_market_cap"] = float(asset["debt"]) / max(1.0, float(asset["market_cap"]))
         asset["production_capacity"] = max(1.0, float(asset.get("production_capacity", 1.0)) * revenue_factor)
+
+    integrate_coarse(state, before_population, before_companies, when=when, years=dt)
 
     for code, asset in state.rohstoffe.items():
         shock = global_cycle * 0.7 + _normal(seed, when, f"commodity:{code}", 0.006 * dt, 0.04 * math.sqrt(dt))
@@ -335,6 +347,7 @@ def _rebaseline_handoff_state(state: Any) -> None:
     """Make the first production report compare one month with one month."""
 
     for asset in state.aktien.values():
+        asset.pop("_workforce_coarse_base_margin", None)
         ensure_stock_fundamentals(asset)
         revenue = max(1.0, float(asset.get("revenue", 1.0)))
         free_cash_flow = float(asset.get("free_cash_flow", 0.0))
@@ -354,7 +367,7 @@ def _rebaseline_handoff_state(state: Any) -> None:
             eps=eps,
             previous_eps=eps,
             previous_dividend_yield=dividend_yield,
-            operating_health=0.0,
+            operating_health=asset.pop("_workforce_coarse_health", 0.0),
             fundamental_repricing_remaining=0.0,
             fundamental_repricing_days=0,
             expectation=0.0,
@@ -387,6 +400,15 @@ def _capture_bucket(state: Any, resolution: str, start: date, end: date, output:
         fields = {"population": "bevoelkerung", "gdp": "bip_abs", "growth": "bip_prozent", "rate": "zins", "inflation": "inflation", "unemployment": "arbeitslosigkeit", "debt_to_gdp": "debt_to_gdp", "balance_sheet": "balance_sheet"}
         for field, key in fields.items():
             add("country_daily", str(region), field, SemanticType.RATE if field in {"growth", "rate", "inflation", "unemployment", "debt_to_gdp"} else SemanticType.LEVEL, float(macro.get(key, 0.0)))
+        workforce = macro.get("workforce")
+        if workforce:
+            add("country_workforce_monthly", str(region), "population_growth_annualized", SemanticType.RATE,
+                workforce["population_growth_annualized"])
+            for pool in ("basic", "skilled", "highly_qualified"):
+                for metric in ("supply", "demand", "coverage", "shortage"):
+                    semantic = SemanticType.LEVEL if metric in {"supply", "demand"} else SemanticType.RATE
+                    add("country_workforce_monthly", str(region), f"{pool}_{metric}", semantic,
+                        workforce[metric][pool])
     for code, item in {**state.rohstoffe, **state.processed_products}.items():
         for field, key, semantic in (("price", "kurs", SemanticType.PRICE), ("produced", "supply", SemanticType.LEVEL), ("demanded", "demand", SemanticType.LEVEL), ("inventories", "inventories", SemanticType.LEVEL)):
             add("product_daily", str(code), field, semantic, float(item.get(key, 0.0)))

@@ -414,7 +414,8 @@ class ForexView(QFrame):
                 break
         selection_model = self.table.selectionModel()
         selection_model.blockSignals(True)
-        self.table.selectRow(target_proxy.row())
+        if self.table.currentIndex().row() != target_proxy.row():
+            self.table.selectRow(target_proxy.row())
         selection_model.blockSignals(False)
         if redraw_chart:
             self._show_index(target_proxy, QModelIndex())
@@ -434,6 +435,11 @@ class ForexView(QFrame):
         )
 
     def _pair_history(self, pair: ForexPair) -> list[float]:
+        provider = getattr(self, "scope_provider", None)
+        source_pair = pair.source_pair or pair.pair
+        if provider is not None and getattr(self, "_scope_pair", None) != source_pair:
+            self.state = provider({"view": "forex", "selection": {"pair": source_pair}})
+            self._scope_pair = source_pair
         if self.history_provider is not None:
             history = self.history_provider(pair.source_pair or pair.pair, 1200)
             if history:
@@ -457,6 +463,8 @@ class ForexView(QFrame):
         current = self.pair_filter.currentText() or "GLD Pairs"
         currencies = sorted({pair.base for pair in self.pairs} | {pair.quote for pair in self.pairs})
         options = ["GLD Pairs", "All Pairs", *[f"{currency} Pairs" for currency in currencies if currency != "GLD"]]
+        if [self.pair_filter.itemText(i) for i in range(self.pair_filter.count())] == options:
+            return
         self.pair_filter.blockSignals(True)
         self.pair_filter.clear()
         self.pair_filter.addItems(options)

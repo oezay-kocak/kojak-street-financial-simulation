@@ -102,9 +102,21 @@ def ensure_financial_product_universe(daten: ModuleType, *, reset: bool = False)
 
 def update_financial_products(daten: ModuleType, zeit_str: str) -> None:
     ensure_financial_product_universe(daten)
+    government_bonds = None
     for ticker, product, instrument_type in _financial_product_runtimes(daten):
         old_price = float(product.get("kurs", 100.0))
-        price = _price_product(daten, ticker, product, instrument_type)
+        if instrument_type == "Yield Future":
+            if government_bonds is None:
+                government_bonds = {}
+                # Bond membership stays fixed throughout derivative pricing.
+                # Retain book order for equal-distance maturity ties.
+                for bond in getattr(daten, "bond_market", []):
+                    if str(bond.get("issuer_type", "")) == "Government":
+                        government_bonds.setdefault(str(bond.get("region", "")), []).append(bond)
+            country = str(product.get("underlying", ""))
+            price = _yield_future_price(daten, product, government_bonds.get(country, ()))
+        else:
+            price = _price_product(daten, ticker, product, instrument_type)
         product["kurs"] = max(0.01, price)
         product["aenderung"] = ((product["kurs"] - old_price) / old_price * 100.0) if old_price > 0 else 0.0
         product["market_cap"] = float(product.get("open_interest", DERIVATIVE_MARKET_CAP))
@@ -438,7 +450,7 @@ def _option_price(daten: ModuleType, product: dict[str, Any]) -> float:
     return intrinsic + time_value
 
 
-def _yield_future_price(daten: ModuleType, product: dict[str, Any]) -> float:
+def _yield_future_price(daten: ModuleType, product: dict[str, Any], bonds=None) -> float:
     country = str(product.get("underlying", ""))
     tenor = float(product.get("tenor_years", 10))
     macro = getattr(daten, "makro", {}).get(country, {})
@@ -446,7 +458,7 @@ def _yield_future_price(daten: ModuleType, product: dict[str, Any]) -> float:
     inflation = float(macro.get("inflation", 0.01))
     growth = float(macro.get("bip_prozent", 0.01))
     debt = float(macro.get("debt_to_gdp", 0.60))
-    bond_market_yield = _government_bond_market_yield(daten, country, tenor)
+    bond_market_yield = _government_bond_market_yield(daten, country, tenor, bonds)
     curve = (tenor / 30.0) * (inflation * 0.45 + max(0.0, debt - 0.55) * 0.025 - growth * 0.20)
     macro_yield = policy * (0.72 if tenor <= 2 else 0.45) + inflation * 0.55 + curve
     yield_rate = max(0.001, macro_yield * 0.60 + bond_market_yield * 0.40 if bond_market_yield else macro_yield)
@@ -580,10 +592,10 @@ def _parse_date(value: object) -> datetime | None:
         return None
 
 
-def _government_bond_market_yield(daten: ModuleType, country: str, tenor: float) -> float:
+def _government_bond_market_yield(daten: ModuleType, country: str, tenor: float, bonds=None) -> float:
     candidates = [
         bond
-        for bond in getattr(daten, "bond_market", [])
+        for bond in (getattr(daten, "bond_market", []) if bonds is None else bonds)
         if str(bond.get("issuer_type", "")) == "Government"
         and str(bond.get("region", "")) == country
         and float(bond.get("yield_to_maturity", 0.0) or 0.0) > 0.0

@@ -18,6 +18,7 @@ from kojakstreet.core.companies import (
 from kojakstreet.core.fundamentals import stage_fundamental_repricing, update_stock_fundamentals
 from kojakstreet.core.psychology import update_asset_expectations
 from kojakstreet.core.ratings import DEFAULT_RATING, RATINGS, default_probability, rating_index
+from kojakstreet.core.workforce import company_contribution
 
 NewsCallback = Callable[[str, str], None]
 
@@ -41,12 +42,20 @@ def update_monthly_companies(daten: ModuleType) -> None:
         land_growth = daten.makro.get(asset["land"], {}).get("bip_prozent", 0.002)
         sector_factor = sector_energy_factor(asset["branche"], energy_shock, metals_shock) * regional_factor
         sector_factor = 1.0 + ((sector_factor - 1.0) * (1.0 - hedge["sector"]))
+        # The previous report's frozen skill mismatch acts exactly once here.
+        # It is separate from input shortages and cannot be hedged or rewarded.
+        result += company_contribution(daten, asset)
         update_stock_fundamentals(asset, land_growth, result, sector_factor)
         update_company_finances_for_asset(daten, asset, sector_factor)
         stage_fundamental_repricing(asset)
         update_asset_expectations(asset, "Stock")
         update_company_rating(asset)
-        if ticker in daten.depot and asset["kurs"] > 10.0:
+        frame = getattr(daten, "_player_day_frame", None)
+        if frame is not None and asset["kurs"] > 10.0:
+            amount = dividend_per_share(asset, land_growth)
+            if amount > 0:
+                frame.events.append(("dividend", ticker, asset["kurs"], float(asset.get("dividend_yield", 0.0)) / 12.0, asset["land"]))
+        elif ticker in daten.depot and asset["kurs"] > 10.0:
             pay_dividend(daten, ticker, asset, land_growth)
 
 
@@ -231,11 +240,17 @@ def update_company_rating(asset: dict[str, Any]) -> None:
 
 
 def pay_dividend(daten: ModuleType, ticker: str, asset: dict[str, Any], land_growth: float) -> None:
+    if dividend_per_share(asset, land_growth) <= 0:
+        return
+    dividend = daten.depot[ticker]["stueck"] * asset["kurs"] * (float(asset.get("dividend_yield", 0.0)) / 12.0)
+    daten.forex_depot[asset["land"]] = daten.forex_depot.get(asset["land"], 0.0) + dividend
+
+
+def dividend_per_share(asset: dict[str, Any], land_growth: float) -> float:
     dividend_yield = float(asset.get("dividend_yield", 0.0))
     if dividend_yield <= 0 or (land_growth <= 0 and asset.get("free_cash_flow", 0.0) <= 0):
-        return
-    dividend = daten.depot[ticker]["stueck"] * asset["kurs"] * (dividend_yield / 12.0)
-    daten.forex_depot[asset["land"]] = daten.forex_depot.get(asset["land"], 0.0) + dividend
+        return 0.0
+    return asset["kurs"] * (dividend_yield / 12.0)
 
 
 def company_regional_factor(daten: ModuleType, asset: dict[str, Any]) -> float:

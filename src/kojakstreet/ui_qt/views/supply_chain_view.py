@@ -40,6 +40,7 @@ class SupplyChainView(QFrame):
         current_provider: Callable[[], list[dict[str, object]]] | None = None,
         company_current_provider: Callable[[], list[dict[str, object]]] | None = None,
         company_output_provider: Callable[[], list[dict[str, object]]] | None = None,
+        scope_provider=None,
     ) -> None:
         super().__init__()
         self.state = state
@@ -47,6 +48,7 @@ class SupplyChainView(QFrame):
         self.current_provider = current_provider
         self.company_current_provider = company_current_provider
         self.company_output_provider = company_output_provider
+        self.scope_provider = scope_provider
         self.setObjectName("Panel")
         self.rows: list[dict[str, Any]] = []
         self.filtered_rows: list[dict[str, Any]] = []
@@ -360,6 +362,10 @@ class SupplyChainView(QFrame):
         if not isinstance(row, dict):
             return
         self.selected_code = str(row["code"])
+        if self.scope_provider is not None:
+            self.state = self.scope_provider({"view": "supply_chain", "selection": {"code": self.selected_code}})
+            self.rows = self._build_rows()
+            row = self._row_for_code(self.selected_code) or row
         self._draw_row_charts(row)
         self.pages.setCurrentWidget(self.detail_page)
 
@@ -499,7 +505,8 @@ class SupplyChainView(QFrame):
             if isinstance(row, dict) and row["code"] == target_code:
                 self.table_model.ensure_row_loaded(row_index)
                 self.table.blockSignals(True)
-                self.table.selectRow(row_index)
+                if self.table.currentIndex().row() != row_index:
+                    self.table.selectRow(row_index)
                 self.table.blockSignals(False)
                 self.selected_code = str(target_code)
                 return
@@ -511,6 +518,8 @@ class SupplyChainView(QFrame):
         return None
 
     def _show_list(self) -> None:
+        if self.scope_provider is not None:
+            self.state = self.scope_provider({"view": "supply_chain"})
         self.apply_filters(selected_code=self.selected_code)
         self.pages.setCurrentWidget(self.list_page)
 

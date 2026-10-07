@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import copy
 
-from kojakstreet.core.countries import RESERVE_CURRENCY
 from kojakstreet.core.checkpoints import REFERENCE_CACHE_KEYS
+from kojakstreet.core.countries import RESERVE_CURRENCY
 from kojakstreet.core.state import GameState
+from kojakstreet.core.player_accounting import visible_news
 
 UI_HISTORY_LIMIT = 520
 
@@ -35,7 +36,7 @@ def snapshot_from_legacy(daten_module, profile: str = "full") -> GameState:
         loans=dict(getattr(daten_module, "kredite", {})) if "loans" in include else {},
         bonds=[dict(bond) for bond in getattr(daten_module, "anleihen", [])] if "bonds" in include else [],
         bond_market=_copy_bond_market(getattr(daten_module, "bond_market", []), include_history=include_bond_histories) if "bond_market" in include else [],
-        news=list(getattr(daten_module, "NEWS_SPEICHER", [])) if "news" in include else [],
+        news=visible_news(daten_module) if "news" in include else [],
         macro=_copy_macro_mapping(daten_module, include_sector_summary="stocks" not in include) if "macro" in include else {},
         macro_history=_copy_history_mapping(getattr(daten_module, "MAKRO_HISTORIE", {})) if "macro_history" in include else {},
         global_macro=dict(getattr(daten_module, "global_macro", {})) if "global_macro" in include else {},
@@ -55,7 +56,7 @@ def _profile_includes(profile: str) -> set[str]:
         "stocks", "commodities", "processed_products", "cryptos", "funds", "indices", "derivatives",
         "portfolio", "perpetuals", "fx", "loans", "bonds", "bond_market", "news",
         "macro", "macro_history", "global_macro", "global_macro_history", "forex_history",
-        "currency_strength", "portfolio_history", "realized_pnl", "asset_histories", "bond_histories",
+        "currency_strength", "portfolio_history", "realized_pnl", "asset_histories", "bond_histories", "forex_histories",
     }
     if profile == "markets":
         return {"stocks", "commodities", "processed_products", "cryptos", "funds", "indices", "derivatives", "macro", "portfolio", "perpetuals", "fx", "currency_strength", "asset_histories"}
@@ -151,6 +152,12 @@ def _copy_dict_mapping(values: Mapping) -> dict:
 
 def _copy_macro_mapping(daten_module, *, include_sector_summary: bool) -> dict:
     macro = _copy_dict_mapping(getattr(daten_module, "makro", {}))
+    # Feature roots belong to checkpoints and selected-country projections.
+    # Even explicit broad UI snapshots must not distribute every country's
+    # workforce structure and annual demographic roots.
+    for country in macro.values():
+        for key in ("workforce", "birth_rate", "death_rate", "politics"):
+            country.pop(key, None)
     if not include_sector_summary:
         return macro
     summaries: dict[str, dict[str, dict[str, float]]] = {}

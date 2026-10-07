@@ -11,8 +11,9 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Iterable
 
-HISTORY_SCHEMA_VERSION = 1
-ECONOMIC_MODEL_VERSION = "economic-integrity-v1"
+HISTORY_SCHEMA_VERSION = 3
+ECONOMIC_MODEL_VERSION = "workforce-demographics-v1"
+LEGACY_ECONOMIC_MODEL_VERSION = "economic-integrity-v1"
 RAW_RETENTION_DAYS = 730
 HOT_PRICE_POINTS = 520  # longest calculation is 180 days; ~3x safety margin
 HOT_METRIC_POINTS = 900

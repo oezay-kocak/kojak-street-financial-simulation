@@ -296,13 +296,16 @@ class AssetChartPanel(QFrame):
         points = self._history_points(history)
         self._chart_history = history
         self._chart_points = points
-        if self.chart_mode != "Line":
-            return
         self._update_performance(points)
-        self._pending_live_points = points
         self._draw_positioning(data)
+        if self.chart_mode != "Line":
+            self._draw_chart(points, history)
+            return
+        self._pending_live_points = points
         if not self._live_redraw_timer.isActive():
-            self._live_redraw_timer.start(48)
+            # Coalesce updates already queued in this Qt turn, then paint the
+            # latest points without an additional fixed delay.
+            self._live_redraw_timer.start(0)
 
     def _flush_live_line_redraw(self) -> None:
         if self._pending_live_points is None:

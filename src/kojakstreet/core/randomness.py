@@ -15,3 +15,5 @@ def set_simulation_seed(daten: Any, seed: int | None) -> None:
     random.seed(seed)
     np.random.seed(seed)
     setattr(daten, "simulation_seed", seed)
+    if hasattr(daten, "player_rng_state"):
+        delattr(getattr(daten, "legacy_data", daten), "player_rng_state")

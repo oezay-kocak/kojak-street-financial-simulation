@@ -207,9 +207,11 @@ def test_markets_view_double_click_opens_in_app_stock_detail() -> None:
 
     assert view.pages.currentWidget() is view.stock_detail_view
     assert view.stock_detail_view.ticker == view.model.rows[stock_row]["ticker"]
+    view.stock_detail_view.detail_tabs.setCurrentWidget(view.stock_detail_view.overview_tab)
     kpi_texts = [label.text() for label in view.stock_detail_view.findChildren(QLabel)]
     assert "RATING" in kpi_texts
     assert "DEFAULT PROBABILITY" in kpi_texts
+    view.stock_detail_view.detail_tabs.setCurrentWidget(view.stock_detail_view.chart_tab)
     assert "Price" not in view.stock_detail_view.legend_labels
     assert view.stock_detail_view.legend_labels == []
     view.stock_detail_view.set_indicator(20, True)
@@ -338,7 +340,9 @@ def test_markets_view_double_click_opens_in_app_crypto_detail() -> None:
     assert view.stock_detail_view.detail_tabs.isHidden() is False
     assert view.stock_detail_view.kpi_frame.isHidden() is False
     assert view.stock_detail_view.detail_tabs.isTabEnabled(1) is True
+    view.stock_detail_view.detail_tabs.setCurrentWidget(view.stock_detail_view.supply_tab)
     assert view.stock_detail_view.supply_table.model().rowCount() >= 5
+    view.stock_detail_view.detail_tabs.setCurrentWidget(view.stock_detail_view.overview_tab)
     kpi_texts = [label.text() for label in view.stock_detail_view.findChildren(QLabel)]
     assert "DEMAND" in kpi_texts
     assert "MARKET SHARE" in kpi_texts
@@ -615,6 +619,7 @@ def test_derivative_detail_shows_use_case_text() -> None:
     detail = StockDetailView(state=state)
 
     detail.update_asset(future["ticker"], future["data"], "Derivative", state)
+    detail.detail_tabs.setCurrentWidget(detail.overview_tab)
     labels = [label.text() for label in detail.findChildren(QLabel)]
 
     assert app is not None

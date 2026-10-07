@@ -192,7 +192,7 @@ def generate(
             "finalization_seconds": elapsed_seconds - simulation_seconds,
             "days_per_second": target_days / simulation_seconds if simulation_seconds else None,
             "simulated_years_per_minute": years / (simulation_seconds / 60.0) if simulation_seconds else None,
-            "strategy": "production_equivalent" if use_full_daily else "fast_history_v2",
+            "strategy": "production_equivalent" if use_full_daily else "fast_history_v3",
             "coarse_buckets": coarse_buckets,
             "daily_burn_in_days": daily_days,
             "process_cpu_seconds": time.process_time() - started_cpu,

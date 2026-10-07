@@ -22,15 +22,20 @@ from kojakstreet.core.monthly_assets import (
     update_monthly_commodities,
     update_monthly_crypto,
 )
+from kojakstreet.core.performance import record_phase_duration
+from kojakstreet.core.player_accounting import PlayerDay, SettlementView
+from kojakstreet.core.politics import monthly as monthly_politics
+from kojakstreet.core.politics import process_due as political_events
+from kojakstreet.core.politics import refresh_crisis_pressure
 from kojakstreet.core.portfolio_risk import (
     update_credit_interest_charges,
     update_future_settlements,
     update_perpetual_liquidations,
     update_spot_derivative_settlements,
 )
-from kojakstreet.core.performance import record_phase_duration
 from kojakstreet.core.production_chains import update_production_chain
 from kojakstreet.core.production_signals import emit_production_chain_news
+from kojakstreet.core.workforce import aggregate as aggregate_workforce
 
 BOND_MARKET_UPDATE_INTERVAL_DAYS = 30
 BOND_MARKET_DAILY_REFRESH_LIMIT = 120
@@ -64,23 +69,64 @@ class DailySimulation:
         if self.daten.spiel_pausiert:
             return
 
+        frame = self.prepare_world_day()
+        self.commit_player_day(frame)
+
+    def prepare_world_day(self) -> PlayerDay:
+        """Evolve only the world; capture the original marks for player commit."""
+        frame = PlayerDay(self.daten.datum)
+        self.daten._player_day_frame = frame
+        try:
+            self._prepare_world_day(frame)
+        finally:
+            self.daten._player_day_frame = None
+        return frame
+
+    def _prepare_world_day(self, frame: PlayerDay) -> None:
         self.daten.simulation_phase_timings = []
+        next_due = getattr(self.daten, "politics_calendar", {}).get("next_due")
+        if next_due and self.daten.datum.date().isoformat() >= next_due:
+            self._phase("political_events", lambda: political_events(self.daten, add_news=self.add_news))
         monthly_processed = self._phase("monthly_report", self._run_monthly_company_report_if_due)
 
+        previous_event = self.daten.aktives_event
         self._phase("events", lambda: run_event_phase(self.daten, self.add_news))
+        if previous_event is not self.daten.aktives_event:
+            self._phase("political_pressure", lambda: refresh_crisis_pressure(self.daten, previous_event))
 
         self._phase("global_macro", self._update_global_macro)
         # Monthly production already books today's inventories and flows.
         if not monthly_processed:
             self._phase("daily_production", self._update_daily_production)
-        self._phase("credit_interest", lambda: update_credit_interest_charges(self.daten))
+        frame.credit_rates = {
+            land: {"zins": macro.get("zins", 0.05)} for land, macro in self.daten.makro.items()
+        }
         self._phase("bond_market", self._update_bond_market_if_due)
         self._phase("asset_market", self._update_asset_market)
         self._phase("derivatives", self._update_derivatives)
-        self._phase("spot_derivative_settlements", lambda: update_spot_derivative_settlements(self.daten, self.add_news))
-        self._phase("future_settlements", lambda: update_future_settlements(self.daten, self.add_news))
+        # Rolls mutate contract prices/terms in place. Accounting must see the
+        # pre-roll contracts, even when the world is prepared before publication.
+        frame.settlement_contracts = {
+            ticker: {"kurs": asset.get("kurs", 0.0), "land": asset.get("land", "GD")}
+            for ticker, asset in getattr(self.daten, "derivatives", {}).items()
+        }
         self._phase("derivative_rolls", lambda: roll_expired_financial_products(self.daten))
-        self._phase("perpetuals", lambda: update_perpetual_liquidations(self.daten, self.add_news))
+
+        if self._policy_decision_due():
+            self.daten.LETZTER_ZINS_TAG = self.daten.datum
+            self._run_policy_decision()
+
+    def commit_player_day(self, frame: PlayerDay) -> None:
+        if frame.date != self.daten.datum:
+            raise ValueError("Player accounting frame does not match the published day")
+        frame.apply_events(self.daten)
+        marks = SettlementView(self.daten, frame)
+        marks.makro = frame.credit_rates
+        self._phase("credit_interest", lambda: update_credit_interest_charges(marks))
+        marks.makro = self.daten.makro
+        self._phase("spot_derivative_settlements", lambda: update_spot_derivative_settlements(marks, self.add_player_news))
+        self._phase("future_settlements", lambda: update_future_settlements(marks, self.add_player_news))
+        self._phase("perpetuals", lambda: update_perpetual_liquidations(self.daten, self.add_player_news))
         self._phase("bond_portfolio", self._update_bond_portfolio)
 
         if get_net_worth(self.daten) <= 0:
@@ -90,8 +136,7 @@ class DailySimulation:
             else:
                 self.daten.SPIEL_AKTIV = False
                 self.daten.spiel_pausiert = True
-            self.add_news(" MARGIN CALL: Your net worth is depleted.", "ROT")
-            return
+            self.add_player_news(" MARGIN CALL: Your net worth is depleted.", "ROT")
 
         if not hasattr(self.daten, "handels_tage_zaehler"):
             self.daten.handels_tage_zaehler = 0
@@ -100,10 +145,6 @@ class DailySimulation:
         self.daten.DEPOT_VERMOEGEN_HISTORIE.append((get_net_worth(self.daten), zeit_str))
         if len(self.daten.DEPOT_VERMOEGEN_HISTORIE) > 520:
             del self.daten.DEPOT_VERMOEGEN_HISTORIE[:-520]
-
-        if self._policy_decision_due():
-            self.daten.LETZTER_ZINS_TAG = self.daten.datum
-            self._run_policy_decision()
 
         self._complete_and_advance_day()
 
@@ -152,9 +193,17 @@ class DailySimulation:
 
     def _update_bond_portfolio(self) -> None:
         if hasattr(self.anleihen, "update_owned_bonds"):
-            self.anleihen.update_owned_bonds(self.add_news)
+            self.anleihen.update_owned_bonds(self.add_player_news)
             return
-        self.anleihen.update_laufende_anleihen(self.add_news, self.daten)
+        self.anleihen.update_laufende_anleihen(self.add_player_news, self.daten)
+
+    def add_player_news(self, text: str, kategorie: str = "WEISS") -> None:
+        if "Gewinn" in text or "Verlust" in text:
+            return
+        if not hasattr(self.daten, "PLAYER_NEWS_SPEICHER"):
+            self.daten.PLAYER_NEWS_SPEICHER = []
+        self.daten.PLAYER_NEWS_SPEICHER.insert(0, (self.daten.datum.strftime("%d.%m.%Y"), text, kategorie))
+        del self.daten.PLAYER_NEWS_SPEICHER[50:]
 
     def add_news(self, text: str, kategorie: str = "WEISS") -> None:
         if "Gewinn" in text or "Verlust" in text:
@@ -172,6 +221,7 @@ class DailySimulation:
         phase_started = perf_counter()
         self._update_monthly_macro()
         self._record_phase_duration("monthly_macro", phase_started)
+        self._phase("monthly_politics", lambda: monthly_politics(self.daten))
         phase_started = perf_counter()
         self._update_monthly_companies()
         self._record_phase_duration("monthly_companies", phase_started)
@@ -189,6 +239,10 @@ class DailySimulation:
         phase_started = perf_counter()
         self._update_monthly_production()
         self._record_phase_duration("monthly_production", phase_started)
+
+        phase_started = perf_counter()
+        aggregate_workforce(self.daten, force=True)
+        self._record_phase_duration("monthly_workforce", phase_started)
 
         phase_started = perf_counter()
         self._update_monthly_crypto(global_macro_growth, global_world_rate)

@@ -475,6 +475,11 @@ class PortfolioView(QFrame):
             self.close_future_button.setVisible(False)
             return
         meta = self.row_metadata[current]
+        provider = getattr(self, "scope_provider", None)
+        identity = (meta["asset_type"], meta["ticker"])
+        if provider is not None and getattr(self, "_scope_position", None) != identity:
+            self.state = provider({"view": "portfolio", "selection": {"kind": identity[0], "ticker": identity[1]}})
+            self._scope_position = identity
         data = self._all_assets().get(meta["ticker"])
         if not data:
             return

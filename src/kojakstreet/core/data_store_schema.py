@@ -221,7 +221,24 @@ CREATE_TABLE_STATEMENTS = (
     """,
 )
 
+CREATE_TABLE_STATEMENTS += (
+    """
+    CREATE TABLE IF NOT EXISTS country_workforce_monthly (
+        date DATE, region VARCHAR, model_version INTEGER, activated_on VARCHAR,
+        population DOUBLE, birth_rate DOUBLE, death_rate DOUBLE,
+        population_growth DOUBLE, population_interval_years DOUBLE,
+        population_interval_end VARCHAR, population_growth_annualized DOUBLE,
+        basic_supply DOUBLE, basic_demand DOUBLE, basic_coverage DOUBLE, basic_shortage DOUBLE,
+        skilled_supply DOUBLE, skilled_demand DOUBLE, skilled_coverage DOUBLE, skilled_shortage DOUBLE,
+        highly_qualified_supply DOUBLE, highly_qualified_demand DOUBLE,
+        highly_qualified_coverage DOUBLE, highly_qualified_shortage DOUBLE
+    )
+    """,
+)
+
 CURRENT_TABLE_SOURCES = {
+    "country_politics_current": "country_politics_snapshot",
+    "country_workforce_current": "country_workforce_monthly",
     "asset_current": "asset_daily",
     "product_current": "product_daily",
     "company_current": "company_daily",
@@ -237,6 +254,19 @@ CURRENT_TABLE_SOURCES = {
     "event_current": "event_log",
     "phase_metric_current": "phase_metric_daily",
 }
+
+CREATE_TABLE_STATEMENTS += (
+    """CREATE TABLE IF NOT EXISTS country_politics_snapshot (
+        date DATE, region VARCHAR, revision BIGINT, payload_json VARCHAR
+    )""",
+    """CREATE TABLE IF NOT EXISTS country_politics_monthly (
+        date DATE, region VARCHAR, political_stability DOUBLE, macro_pressure DOUBLE,
+        stability DOUBLE, premium DOUBLE, revision BIGINT
+    )""",
+    """CREATE TABLE IF NOT EXISTS politics_events (
+        date DATE, event_id VARCHAR PRIMARY KEY, region VARCHAR, event_type VARCHAR, metadata_json VARCHAR
+    )""",
+)
 
 MIGRATION_COLUMNS = {
     "bond_daily": (

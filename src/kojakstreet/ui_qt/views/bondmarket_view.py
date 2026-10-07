@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from kojakstreet.core.bonds import BondOffer, build_bond_offers
 from kojakstreet.core.ratings import RATINGS
 from kojakstreet.core.state import GameState
+from kojakstreet.ui_qt.combo_options import patch_combo
 from kojakstreet.ui_qt.display import display_label, display_text
 from kojakstreet.ui_qt.formatters import percent
 from kojakstreet.ui_qt.table_performance import optimize_table_view
@@ -42,11 +43,14 @@ class BondMarketView(QFrame):
         state: GameState,
         history_provider: Callable[[str, int], list] | None = None,
         current_provider: Callable[[], list[dict[str, object]]] | None = None,
+        scope_provider=None,
     ) -> None:
         super().__init__()
         self.state = state
         self.history_provider = history_provider
         self.current_provider = current_provider
+        self.scope_provider = scope_provider
+        self._scope_symbol = None
         self.all_offers = self._current_offers() or build_bond_offers(state, "All")
         self.offers = []
         self.table: QTableView | None = None
@@ -257,12 +261,7 @@ class BondMarketView(QFrame):
         current = self.category_filter.currentData() or "Government"
         categories = sorted({offer.category for offer in self.all_offers if offer.category and offer.category != "Government"})
         options = ["Government", *categories]
-        self.category_filter.blockSignals(True)
-        self.category_filter.clear()
-        for option in options:
-            self.category_filter.addItem(display_label(option), option)
-        self.category_filter.setCurrentIndex(options.index(current) if current in options else 0)
-        self.category_filter.blockSignals(False)
+        patch_combo(self.category_filter, [(display_label(option), option) for option in options], selected=current)
         self._populate_secondary_filters()
 
     def _populate_secondary_filters(self) -> None:
@@ -284,22 +283,12 @@ class BondMarketView(QFrame):
         selected_rating = _preferred_rating(rating_current, available_ratings)
         maturities = _available_maturities(category_offers, selected_region, selected_rating)
         selected_maturity = _preferred_maturity(maturity_current, maturities)
-        self.region_filter.blockSignals(True)
-        self.rating_filter.blockSignals(True)
-        self.maturity_filter.blockSignals(True)
-        self.region_filter.clear()
-        self.rating_filter.clear()
-        self.maturity_filter.clear()
-        for region in regions:
-            self.region_filter.addItem(display_label(region), region)
-        self.rating_filter.addItems(ratings)
-        self.maturity_filter.addItems(maturities)
-        self.region_filter.setCurrentIndex(regions.index(selected_region) if selected_region in regions else 0)
-        self.rating_filter.setCurrentText(selected_rating)
-        self.maturity_filter.setCurrentText(selected_maturity)
-        self.region_filter.blockSignals(False)
-        self.rating_filter.blockSignals(False)
-        self.maturity_filter.blockSignals(False)
+        with QSignalBlocker(self.region_filter), QSignalBlocker(self.rating_filter), QSignalBlocker(self.maturity_filter):
+            patch_combo(self.region_filter, [(display_label(region), region) for region in regions], selected=selected_region)
+            patch_combo(self.rating_filter, [(rating, None) for rating in ratings])
+            patch_combo(self.maturity_filter, [(maturity, None) for maturity in maturities])
+            self.rating_filter.setCurrentText(selected_rating)
+            self.maturity_filter.setCurrentText(selected_maturity)
 
     def apply_filter(self) -> None:
         self._reload_offers()
@@ -334,11 +323,9 @@ class BondMarketView(QFrame):
         category_offers = [offer for offer in self.all_offers if _matches_category(offer, category)]
         maturities = _available_maturities(category_offers, region, rating)
         selected_maturity = _preferred_maturity(self.maturity_filter.currentText(), maturities)
-        self.maturity_filter.blockSignals(True)
-        self.maturity_filter.clear()
-        self.maturity_filter.addItems(maturities)
-        self.maturity_filter.setCurrentText(selected_maturity)
-        self.maturity_filter.blockSignals(False)
+        with QSignalBlocker(self.maturity_filter):
+            patch_combo(self.maturity_filter, [(maturity, None) for maturity in maturities])
+            self.maturity_filter.setCurrentText(selected_maturity)
 
     def _reload_offers(self) -> None:
         category = self.category_filter.currentData() if self.category_filter is not None else "Government"
@@ -383,6 +370,9 @@ class BondMarketView(QFrame):
         self.pages.setCurrentWidget(self.bond_detail_view)
 
     def _update_bond_detail(self, offer: BondOffer) -> None:
+        if self.scope_provider is not None and self._scope_symbol != offer.symbol:
+            self.state = self.scope_provider({"view": "bondmarket", "selection": {"ticker": offer.symbol}})
+            self._scope_symbol = offer.symbol
         history = self._bond_history(offer.symbol)
         if len(history) < 2:
             history = [(offer.price, "", ""), (offer.price, "", "")]
@@ -399,6 +389,9 @@ class BondMarketView(QFrame):
 
     def _show_bond_list(self) -> None:
         self.pages.setCurrentWidget(self.main_page)
+        if self.scope_provider is not None:
+            self.state = self.scope_provider({"view": "bondmarket"})
+            self._scope_symbol = None
 
     def _offer_by_symbol(self, symbol: str) -> BondOffer | None:
         for offer in self.offers:
@@ -431,7 +424,8 @@ class BondMarketView(QFrame):
         if not symbol or self.table is None:
             return
         row = self.model.row_for_symbol(symbol)
-        self.table.selectRow(row)
+        if self.table.currentIndex().row() != row:
+            self.table.selectRow(row)
 
 
 def _average(values: list[float]) -> float:
@@ -582,6 +576,8 @@ class BondOfferTableModel(QAbstractTableModel):
         self.offers = offers
         self.loaded_rows = min(320, len(offers))
         self.batch_size = 320
+        self._sort_column = -1
+        self._sort_order = Qt.SortOrder.AscendingOrder
 
     def rowCount(self, parent: QModelIndex | None = None) -> int:
         return 0 if parent and parent.isValid() else self.loaded_rows
@@ -635,15 +631,25 @@ class BondOfferTableModel(QAbstractTableModel):
     def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder) -> None:
         if column < 0 or column >= len(self.HEADERS):
             return
+        self._sort_column, self._sort_order = column, order
+        old = list(self.offers)
+        ordered = sorted(old, key=lambda offer: _bond_sort_value(offer, column), reverse=order == Qt.SortOrder.DescendingOrder)
+        if [offer.symbol for offer in ordered] == [offer.symbol for offer in old]:
+            return
+        persistent = self.persistentIndexList()
         self.layoutAboutToBeChanged.emit()
-        reverse = order == Qt.SortOrder.DescendingOrder
-        self.offers.sort(key=lambda offer: _bond_sort_value(offer, column), reverse=reverse)
+        self.offers = ordered
+        positions = {offer.symbol: i for i, offer in enumerate(self.offers)}
+        self.changePersistentIndexList(persistent, [self.index(positions[old[index.row()].symbol], index.column()) for index in persistent])
         self.loaded_rows = min(max(self.batch_size, self.loaded_rows), len(self.offers))
         self.layoutChanged.emit()
 
     def set_offers(self, offers: list[BondOffer]) -> None:
-        if _offers_signature(self.offers) == _offers_signature(offers):
-            self.offers = offers
+        by_symbol = {offer.symbol: offer for offer in offers}
+        if len(self.offers) == len(offers) and set(by_symbol) == {offer.symbol for offer in self.offers}:
+            self.offers = [by_symbol[old.symbol] for old in self.offers]
+            if self._sort_column >= 0:
+                self.sort(self._sort_column, self._sort_order)
             if self.offers:
                 self.dataChanged.emit(
                     self.index(0, 0),

@@ -8,7 +8,6 @@ from typing import Any
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
-
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 METADATA_ROLE = Qt.ItemDataRole.UserRole + 2
 
@@ -36,6 +35,7 @@ class SimpleTableModel(QAbstractTableModel):
         self.batch_size = 160
         self.right_aligned_columns = right_aligned_columns or set()
         self.color_callback = color_callback
+        self._row_keys = []
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else self.loaded_rows
@@ -105,6 +105,8 @@ class SimpleTableModel(QAbstractTableModel):
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
     def set_headers(self, headers: list[str]) -> None:
+        if self.headers == list(headers):
+            return
         self.beginResetModel()
         self.headers = list(headers)
         self.rows = []
@@ -112,6 +114,7 @@ class SimpleTableModel(QAbstractTableModel):
         self.metadata = []
         self.foreground_colors = []
         self.loaded_rows = 0
+        self._row_keys = []
         self.endResetModel()
 
     def set_rows(
@@ -124,6 +127,16 @@ class SimpleTableModel(QAbstractTableModel):
         normalized_rows = [[str(value) for value in row] for row in rows]
         normalized_sort = sort_values if sort_values is not None else [list(row) for row in normalized_rows]
         normalized_meta = metadata if metadata is not None else [None for _ in normalized_rows]
+        keys = [_row_identity(row, meta) for row, meta in zip(normalized_rows, normalized_meta, strict=True)]
+        unique_keys = len(set(keys)) == len(keys)
+        same_identities = unique_keys and len(keys) == len(self._row_keys) and set(keys) == set(self._row_keys)
+        if same_identities:
+            positions = {key: i for i, key in enumerate(keys)}
+            permutation = [positions[key] for key in self._row_keys]
+            normalized_rows = [normalized_rows[i] for i in permutation]
+            normalized_sort = [normalized_sort[i] for i in permutation]
+            normalized_meta = [normalized_meta[i] for i in permutation]
+            keys = list(self._row_keys)
         normalized_colors = self._empty_foreground_cache(normalized_rows)
         same_shape = (
             len(normalized_rows) == len(self.rows)
@@ -132,7 +145,7 @@ class SimpleTableModel(QAbstractTableModel):
             and len(normalized_colors) == len(self.foreground_colors)
             and all(len(row) == len(old_row) for row, old_row in zip(normalized_rows, self.rows, strict=True))
         )
-        if same_shape:
+        if same_shape and (same_identities or not unique_keys):
             changed_rows = [
                 index
                 for index, (
@@ -162,6 +175,7 @@ class SimpleTableModel(QAbstractTableModel):
             self.rows = normalized_rows
             self.sort_values = normalized_sort
             self.metadata = normalized_meta
+            self._row_keys = keys
             self.foreground_colors = normalized_colors
             if changed_rows and self.rows and self.headers:
                 visible_changed_rows = [row for row in changed_rows if row < self.loaded_rows]
@@ -185,6 +199,7 @@ class SimpleTableModel(QAbstractTableModel):
         self.rows = normalized_rows
         self.sort_values = normalized_sort
         self.metadata = normalized_meta
+        self._row_keys = keys
         self.foreground_colors = normalized_colors
         self.loaded_rows = min(self.batch_size, len(self.rows))
         self.endResetModel()
@@ -192,7 +207,7 @@ class SimpleTableModel(QAbstractTableModel):
     def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder) -> None:
         if column < 0 or column >= len(self.headers):
             return
-        combined = list(zip(self.rows, self.sort_values, self.metadata, strict=True))
+        combined = list(zip(self.rows, self.sort_values, self.metadata, self._row_keys, range(len(self.rows)), strict=True))
         reverse = order == Qt.SortOrder.DescendingOrder
 
         def sort_key(item: tuple[list[str], list[Any], Any]) -> tuple[int, Any]:
@@ -203,11 +218,17 @@ class SimpleTableModel(QAbstractTableModel):
             except (TypeError, ValueError):
                 return (1, str(value).lower())
 
-        self.layoutAboutToBeChanged.emit()
         combined.sort(key=sort_key, reverse=reverse)
+        if [item[4] for item in combined] == list(range(len(self.rows))):
+            return
+        persistent = self.persistentIndexList()
+        self.layoutAboutToBeChanged.emit()
         self.rows = [item[0] for item in combined]
         self.sort_values = [item[1] for item in combined]
         self.metadata = [item[2] for item in combined]
+        self._row_keys = [item[3] for item in combined]
+        positions = {item[4]: row for row, item in enumerate(combined)}
+        self.changePersistentIndexList(persistent, [self.index(positions[index.row()], index.column()) for index in persistent])
         self.foreground_colors = self._empty_foreground_cache(self.rows)
         self.loaded_rows = min(max(self.batch_size, self.loaded_rows), len(self.rows))
         self.layoutChanged.emit()
@@ -240,6 +261,22 @@ class SimpleTableModel(QAbstractTableModel):
         if isinstance(color, str):
             return QColor(color)
         return None
+
+
+def _row_identity(row, meta):
+    if isinstance(meta, str):
+        return ("key", meta)
+    if isinstance(meta, dict):
+        if "_meta" in meta or "meta" in meta:
+            meta = meta.get("_meta", meta.get("meta"))
+        if "code" in meta:
+            return ("code", str(meta.get("role", "")), str(meta["code"]))
+        if "ticker" in meta:
+            return ("asset", str(meta.get("asset_type", "")), str(meta.get("position_id", meta["ticker"])))
+    for fields in (("date", "headline"), ("country", "indicator", "date"), ("region",), ("symbol",)):
+        if all(hasattr(meta, field) for field in fields):
+            return tuple(str(getattr(meta, field)) for field in fields)
+    return ("label", row[0] if row else "")
 
 
 def _contiguous_ranges(rows: list[int]) -> list[tuple[int, int]]:

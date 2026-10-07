@@ -415,8 +415,9 @@ def test_detail_tab_switch_preserves_chart_state_and_hidden_live_update(monkeypa
         }],
         date_text=live_date,
     )
-    assert draw_calls == 1
+    assert draw_calls == 0
     detail.detail_tabs.setCurrentWidget(detail.chart_tab)
+    assert draw_calls == 1
 
     live_history = detail._history_entries()
     live_dates = [history_date(point) for point in live_history]

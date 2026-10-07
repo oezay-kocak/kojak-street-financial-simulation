@@ -163,17 +163,23 @@ SECTOR_TERMS = {
 }
 
 
-def ensure_company_universe(daten: ModuleType, *, reset: bool = False) -> None:
+def ensure_company_universe(
+    daten: ModuleType, *, reset: bool = False,
+    initial_caps: dict[tuple[str, str], tuple[int, ...]] | None = None,
+    align_names: bool = True,
+) -> None:
     if reset or not getattr(daten, "aktien", None):
         daten.aktien = {}
         for country in daten.LAENDER:
             for sector in BRANCHEN:
-                for _ in range(START_COMPANIES_PER_COUNTRY_SECTOR):
-                    spawn_company(daten, country=country, sector=sector)
+                for slot in range(START_COMPANIES_PER_COUNTRY_SECTOR):
+                    cap = initial_caps[country, sector][slot] if initial_caps is not None else None
+                    spawn_company(daten, country=country, sector=sector, initial_market_cap=cap)
         assign_company_specializations(daten)
     fill_company_universe(daten)
-    _compact_existing_company_names(daten.aktien.values())
-    _align_existing_company_tickers(daten)
+    if align_names:
+        _compact_existing_company_names(daten.aktien.values())
+        _align_existing_company_tickers(daten)
 
 
 def fill_company_universe(daten: ModuleType, target_count: int = TARGET_COMPANY_COUNT) -> list[str]:
@@ -190,14 +196,15 @@ def spawn_company(
     country: str | None = None,
     sector: str | None = None,
     ipo_date: datetime | None = None,
+    initial_market_cap: int | None = None,
 ) -> str:
     country = country or _least_represented(daten.LAENDER.keys(), [a.get("land") for a in daten.aktien.values()])
     sector = sector or opportunity_sector(daten) or _least_represented(BRANCHEN, [a.get("branche") for a in daten.aktien.values()])
     name = _company_name(country, sector, daten.aktien.values())
     ticker = _unique_ticker(_unavailable_company_tickers(daten), name)
     price = round(random.uniform(18.0, 145.0), 2)
-    shares = INITIAL_MARKET_CAP / price
-    market_cap = price * shares
+    shares = (INITIAL_MARKET_CAP if initial_market_cap is None else initial_market_cap) / price
+    market_cap = price * shares if initial_market_cap is None else float(initial_market_cap)
     asset = {
         "name": name,
         "land": country,
@@ -226,6 +233,9 @@ def spawn_company(
     }
     asset["debt_to_market_cap"] = asset["debt"] / max(1.0, market_cap)
     ensure_stock_fundamentals(asset)
+    if initial_market_cap is not None:
+        asset["eps"] = max(0.1, asset["free_cash_flow"] / shares)
+        asset["previous_eps"] = asset["eps"]
     assign_company_specialization(asset, len(daten.aktien))
     daten.aktien[ticker] = asset
     return ticker
@@ -335,14 +345,12 @@ def remove_bankrupt_companies(daten: ModuleType, tickers: list[str]) -> None:
         retired = set(retired)
     for ticker in tickers:
         daten.aktien.pop(ticker, None)
-        daten.depot.pop(ticker, None)
-        daten.perpetuals = {
-            pos_id: pos for pos_id, pos in daten.perpetuals.items() if pos.get("ticker") != ticker
-        }
-        for bond in getattr(daten, "anleihen", []):
-            if str(bond.get("ticker", "")) == ticker:
-                bond["rating"] = "D"
-                bond["defaulted"] = True
+        frame = getattr(daten, "_player_day_frame", None)
+        if frame is not None:
+            frame.events.append(("company_default", ticker))
+        else:
+            from kojakstreet.core.player_accounting import remove_player_assets
+            remove_player_assets(daten, {ticker}, corporate=True)
         for bond in getattr(daten, "bond_market", []):
             if str(bond.get("ticker", "")) == ticker:
                 bond["rating"] = "D"
@@ -447,6 +455,14 @@ def _rewrite_ticker_references(daten: ModuleType, renamed: dict[str, str]) -> No
         ticker = str(bond.get("ticker", ""))
         if ticker in renamed:
             bond["ticker"] = renamed[ticker]
+    if any(old != new for old, new in renamed.items()):
+        for index in getattr(daten, "indizes", {}).values():
+            constituents = index.get("constituents")
+            if isinstance(constituents, dict):
+                index["constituents"] = {
+                    renamed.get(str(ticker), str(ticker)): weight
+                    for ticker, weight in constituents.items()
+                }
 
 
 def _unavailable_company_tickers(daten: ModuleType) -> dict[str, object]:

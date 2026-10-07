@@ -82,9 +82,14 @@ def update_funds(daten: ModuleType, zeit_str: str) -> None:
     asset_cache = _cached_fund_asset_cache(daten, lookup)
     dead_tickers = []
     flow_pressures: dict[tuple[str, str], float] = defaultdict(float)
+    equity_groups = None
     for ticker, fund in list(daten.fonds.items()):
         if _needs_rebalance(fund, month_index):
-            _rebalance_fund(daten, fund, month_index)
+            if equity_groups is None and fund.get("fund_type") in {
+                "Country Fund", "Sector Fund", "Global Sector Fund", "World Fund",
+            }:
+                equity_groups = _equity_candidate_groups(daten)
+            _rebalance_fund(daten, fund, month_index, equity_groups)
             _update_asset_cache_for_fund(asset_cache, lookup, fund)
         _reinvest_cash_reserve(fund)
         old_price = float(fund.get("kurs", START_FUND_PRICE))
@@ -344,12 +349,12 @@ def _add_fund(daten: ModuleType, mandate: dict[str, Any]) -> None:
     _refresh_distribution_yield(fund, _fund_asset_cache(daten, lookup))
 
 
-def _rebalance_fund(daten: ModuleType, fund: dict[str, Any], month_index: int) -> None:
+def _rebalance_fund(daten: ModuleType, fund: dict[str, Any], month_index: int, equity_groups=None) -> None:
     previous = {
         (str(holding.get("asset_type", "")), str(holding.get("ticker", ""))): float(holding.get("weight", 0.0))
         for holding in fund.get("underlyings", [])
     }
-    fund["underlyings"] = _build_underlyings(daten, fund)
+    fund["underlyings"] = _build_underlyings(daten, fund, equity_groups)
     _compile_underlyings(fund)
     _invalidate_fund_runtime_cache(daten)
     fund["last_rebalance_month"] = month_index
@@ -377,13 +382,13 @@ def _reinvest_cash_reserve(fund: dict[str, Any]) -> None:
     fund["cash_allocation"] = max(0.0, cash - random.uniform(0.0010, 0.0040))
 
 
-def _build_underlyings(daten: ModuleType, fund: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_underlyings(daten: ModuleType, fund: dict[str, Any], equity_groups=None) -> list[dict[str, Any]]:
     fund_type = str(fund.get("fund_type", ""))
     if fund_type in {"ETF", "Short ETF", "Leveraged ETF", "Short Leveraged ETF"}:
         tracked = str(fund.get("tracked_index", ""))
         return [{"ticker": tracked, "asset_type": "Index", "weight": 1.0}] if tracked in getattr(daten, "indizes", {}) else []
     if fund_type in {"Country Fund", "Sector Fund", "Global Sector Fund", "World Fund"}:
-        return _equity_underlyings(daten, fund)
+        return _equity_underlyings(daten, fund, equity_groups)
     if fund_type == "Bond Fund":
         return _bond_underlyings(daten, fund)
     if fund_type == "Commodity Fund":
@@ -407,17 +412,42 @@ def _build_underlyings(daten: ModuleType, fund: dict[str, Any]) -> list[dict[str
     return []
 
 
-def _equity_underlyings(daten: ModuleType, fund: dict[str, Any]) -> list[dict[str, Any]]:
+def _equity_candidate_groups(daten: ModuleType) -> dict:
+    # Only membership is shared within this update. Prices/scores are read
+    # from live assets for each fund, and all lists retain original book order.
+    groups = {(None, None): []}
+    for ticker, asset in getattr(daten, "aktien", {}).items():
+        row = (ticker, asset)
+        groups[(None, None)].append(row)
+        country, branch = asset.get("land"), asset.get("branche")
+        if isinstance(country, str):
+            groups.setdefault((country, None), []).append(row)
+        if isinstance(branch, str):
+            groups.setdefault((None, branch), []).append(row)
+            if isinstance(country, str):
+                groups.setdefault((country, branch), []).append(row)
+    return groups
+
+
+def _equity_underlyings(daten: ModuleType, fund: dict[str, Any], equity_groups=None) -> list[dict[str, Any]]:
     country = str(fund.get("ziel", ""))
     branch = str(fund.get("branche", ""))
     strategy = str(fund.get("strategy", ""))
-    stocks = []
-    for ticker, asset in getattr(daten, "aktien", {}).items():
-        if fund.get("fund_type") in {"Country Fund", "Sector Fund"} and asset.get("land") != country:
-            continue
-        if fund.get("fund_type") in {"Sector Fund", "Global Sector Fund"} and asset.get("branche") != branch:
-            continue
-        stocks.append((ticker, asset))
+    fund_type = fund.get("fund_type")
+    if equity_groups is not None:
+        key = (
+            country if fund_type in {"Country Fund", "Sector Fund"} else None,
+            branch if fund_type in {"Sector Fund", "Global Sector Fund"} else None,
+        )
+        stocks = equity_groups.get(key, ())
+    else:
+        stocks = []
+        for ticker, asset in getattr(daten, "aktien", {}).items():
+            if fund_type in {"Country Fund", "Sector Fund"} and asset.get("land") != country:
+                continue
+            if fund_type in {"Sector Fund", "Global Sector Fund"} and asset.get("branche") != branch:
+                continue
+            stocks.append((ticker, asset))
     if "Small Cap" in strategy:
         scored = [(ticker, asset, 1.0 / max(1.0, float(asset.get("market_cap", 1.0)))) for ticker, asset in stocks]
     elif "Growth" in strategy:

@@ -18,10 +18,12 @@ from kojakstreet.core.history import (
     DEFAULT_PIXEL_BUDGET,
     ECONOMIC_MODEL_VERSION,
     HISTORY_SCHEMA_VERSION,
+    LEGACY_ECONOMIC_MODEL_VERSION,
     MAX_PIXEL_BUDGET,
     RAW_RETENTION_DAYS,
     SemanticType,
 )
+from kojakstreet.core.player_accounting import visible_news
 from kojakstreet.core.runtime_context import SimulationDelta
 from kojakstreet.core.store_health import structured_store_health
 
@@ -48,6 +50,7 @@ class EconomicDataStore:
         self._current_delta = SimulationDelta(0, "", frozenset())
         self._duckdb = None
         self._connection = None
+        self._writer = None
         self.transient = False
         try:
             import duckdb
@@ -62,9 +65,85 @@ class EconomicDataStore:
             self.transient = True
         self._create_schema()
         self._history_id = self._ensure_history_metadata()
+        try:
+            self._recover_row_journal()
+        except BaseException:
+            self._connection.close()
+            self._connection = None
+            raise
         self.enabled = True
 
+    def _recover_row_journal(self) -> None:
+        from kojakstreet.core.persistence_writer import RowJournal
+
+        if self.transient and any(Path(str(self.path) + f".row-journal-{i}").exists() for i in range(2)):
+            raise RuntimeError("Durable history cannot be recovered into a transient store")
+        journal = RowJournal(self.path, self._history_id, create=False)
+        for slot, batch in journal.pending:
+            self._write_row_batch(batch, self._connection)
+            journal.acknowledge(slot, batch.sequence)
+
+    def enable_background_flush(self, *, on_error=None) -> None:
+        """Transfer analytical SQL ownership after initialization; never copy the world."""
+        from kojakstreet.core.persistence_writer import OrderedConnection, OrderedWriter
+
+        if self._writer is not None or not self.enabled or self.transient:
+            return
+        threads = int(self._connection.execute("SELECT current_setting('threads')").fetchone()[0])
+        backend = self._duckdb
+        self._connection.close()
+        self._connection = None
+
+        def connect(path):
+            connection = backend.connect(path)
+            connection.execute(f"SET threads={threads}")
+            return connection
+
+        self._writer = OrderedWriter(self.path, self._history_id, connect, self._write_row_batch, on_error)
+        self._connection = OrderedConnection(self._writer)
+
+    def check_persistence_health(self) -> None:
+        if self._writer is not None:
+            self._writer.check()
+
+    def wait_for_persistence(self) -> None:
+        if self._writer is not None:
+            self._writer.barrier()
+
+    @staticmethod
+    def _write_row_batch(batch, connection) -> None:
+        # This target owns only a SQL connection. It has no world, player,
+        # current-table cache, pending buffer or session-history references.
+        target = object.__new__(EconomicDataStore)
+        target._connection = connection
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            for table, rows in batch.pending:
+                target._replace_buffered_rows(table, rows)
+            target._upsert_structural_events(dict(batch.pending).get("event_log", ()))
+            target._compact_completed_history()
+            for table, rows in batch.current:
+                target._replace_current_rows(table, rows)
+            connection.execute("COMMIT")
+        except BaseException as error:
+            try:
+                connection.execute("ROLLBACK")
+            except Exception as rollback_error:  # noqa: BLE001 -- keep the original transaction failure
+                error.add_note(f"Rollback also failed: {rollback_error}")
+            raise
+
     def close(self) -> None:
+        if self._connection is None:
+            return
+        if self._writer is not None:
+            try:
+                self.flush()
+            finally:
+                try:
+                    self._connection.close()
+                finally:
+                    self._connection = None
+            return
         self.flush()
         if self._connection is not None:
             self._connection.close()
@@ -72,6 +151,7 @@ class EconomicDataStore:
 
     def reset_session(self) -> None:
         """Drop analytics from the abandoned timeline when loading a checkpoint."""
+        self.wait_for_persistence()
         self._pending_rows.clear()
         self._pending_days.clear()
         self._current_rows.clear()
@@ -92,6 +172,7 @@ class EconomicDataStore:
     def restore_checkpoint_session(self, session: dict) -> None:
         # V4 saves stored the two row lists directly.  V5-style checkpoints
         # carry a manifest and only bounded recent rows.
+        self.wait_for_persistence()
         self._pending_rows.clear()
         self._pending_days.clear()
         self._current_rows.clear()
@@ -119,7 +200,7 @@ class EconomicDataStore:
             earliest = str(min(starts)) if starts else None
             latest = str(max(ends)) if ends else None
             markers = {str(key): str(value) for key, value in self._connection.execute("SELECT key, value FROM history_metadata WHERE key LIKE 'last_%_compaction'").fetchall()}
-        return {
+        result = {
             "history_schema_version": HISTORY_SCHEMA_VERSION,
             "economic_model_version": ECONOMIC_MODEL_VERSION,
             "history_id": self._history_id,
@@ -128,14 +209,21 @@ class EconomicDataStore:
             "latest_date": latest,
             "completed_buckets": markers,
         }
+        if self._connection is not None:
+            provenance = self._connection.execute(
+                "SELECT key, value FROM history_metadata WHERE key LIKE 'origin_%'"
+            ).fetchall()
+            if provenance:
+                result["origin"] = dict(provenance)
+        return result
 
     def bind_history_manifest(self, manifest: dict[str, object]) -> None:
         expected = str(manifest.get("history_id", ""))
         if expected and expected != self._history_id:
             raise ValueError("Savegame history ID does not match this analytical store")
-        if int(manifest.get("history_schema_version", HISTORY_SCHEMA_VERSION)) != HISTORY_SCHEMA_VERSION:
+        if int(manifest.get("history_schema_version", HISTORY_SCHEMA_VERSION)) not in {1, 2, HISTORY_SCHEMA_VERSION}:
             raise ValueError("Unsupported history schema version")
-        if str(manifest.get("economic_model_version", ECONOMIC_MODEL_VERSION)) != ECONOMIC_MODEL_VERSION:
+        if str(manifest.get("economic_model_version", ECONOMIC_MODEL_VERSION)) not in {LEGACY_ECONOMIC_MODEL_VERSION, ECONOMIC_MODEL_VERSION}:
             raise ValueError("Savegame economic model version does not match this runtime")
 
     def seed_history_aggregates(
@@ -188,6 +276,7 @@ class EconomicDataStore:
 
         if not self.enabled or self._connection is None:
             return
+        self.check_persistence_health()
         record_date = (
             getattr(daten_module, "datum", None)
             if current_scope == "full"
@@ -228,6 +317,11 @@ class EconomicDataStore:
             if report_scope or "country_current" not in self._current_rows
             else self._current_rows.get("country_current", [])
         )
+        workforce_rows = (
+            self._workforce_rows(daten_module)
+            if report_scope or "country_workforce_current" not in self._current_rows
+            else self._current_rows.get("country_workforce_current", [])
+        )
         global_macro_rows = self._global_macro_rows(daten_module, date_text)
         forex_rows = self._forex_rows(daten_module, date_text)
         portfolio_rows = self._portfolio_rows(daten_module, date_text)
@@ -242,6 +336,7 @@ class EconomicDataStore:
             "country_trade_current": country_trade_rows,
             "fund_allocation_current": fund_allocation_rows,
             "country_current": country_rows,
+            "country_workforce_current": workforce_rows,
             "global_macro_current": global_macro_rows,
             "forex_current": forex_rows,
             "portfolio_current": portfolio_rows,
@@ -249,7 +344,21 @@ class EconomicDataStore:
             "event_current": event_rows,
             "phase_metric_current": phase_metric_rows,
         }
+        politics_changed = bool(getattr(daten_module, "_politics_dirty", False)) or "country_politics_current" not in self._current_rows
+        politics_rows = self._current_rows.get("country_politics_current", [])
+        if politics_changed:
+            from kojakstreet.core.politics import json_text
+            politics_rows = [(date_text, c, m["politics"]["revision"], json_text(m["politics"]))
+                             for c, m in sorted(daten_module.makro.items()) if "politics" in m]
+        next_current_rows["country_politics_current"] = politics_rows
+        self._pending_rows["country_politics_monthly"].extend(getattr(daten_module, "_politics_months", []))
+        self._pending_rows["politics_events"].extend(getattr(daten_module, "_politics_events", []))
+        daten_module._politics_months = []
+        daten_module._politics_events = []
+        daten_module._politics_dirty = False
         changed_tables = {"asset_current", "phase_metric_current"}
+        if politics_changed:
+            changed_tables.add("country_politics_current")
         for table, rows in (
             ("product_current", product_rows),
             ("global_macro_current", global_macro_rows),
@@ -266,6 +375,7 @@ class EconomicDataStore:
                     "country_trade_current",
                     "fund_allocation_current",
                     "country_current",
+                    "country_workforce_current",
                 }
             )
         if "news_current" not in self._current_rows or not _same_current_rows(self._current_rows.get("news_current", []), news_rows):
@@ -281,6 +391,11 @@ class EconomicDataStore:
         if report_scope:
             self._pending_rows["company_daily"].extend(company_rows)
             self._pending_rows["country_daily"].extend(country_rows)
+            # Full Save/Load refreshes current roots, but never creates daily
+            # workforce facts between aggregation dates.
+            self._pending_rows["country_workforce_monthly"].extend(
+                row for row in workforce_rows if str(row[0]) == date_text and row[8] > 0
+            )
             self._pending_rows["company_output_daily"].extend(company_output_rows)
             self._pending_rows["country_trade_daily"].extend(country_trade_rows)
             self._pending_rows["fund_allocation_daily"].extend(fund_allocation_rows)
@@ -294,12 +409,14 @@ class EconomicDataStore:
                 "country_trade_current": country_trade_rows,
                 "fund_allocation_current": fund_allocation_rows,
                 "country_current": country_rows,
+                "country_workforce_current": workforce_rows,
                 "global_macro_current": global_macro_rows,
                 "forex_current": forex_rows,
                 "portfolio_current": portfolio_rows,
                 "news_current": news_rows,
                 "event_current": event_rows,
                 "phase_metric_current": phase_metric_rows,
+                "country_politics_current": politics_rows,
         }
         if self._should_record_bonds(daten_module):
             bond_current_rows, bond_rows = self._bond_row_sets(daten_module, date_text)
@@ -323,12 +440,32 @@ class EconomicDataStore:
         self._pending_rows["news_events"].extend(news_rows)
         self._pending_rows["event_log"].extend(event_rows)
         if flush or (self.auto_flush and len(self._pending_days) >= self.flush_interval_days):
-            self.flush()
+            self.flush(defer=not flush and current_scope != "full")
 
-    def flush(self) -> None:
+    def flush(self, *, defer: bool = False) -> None:
         """Write all buffered daily rows to DuckDB."""
 
-        if not self.enabled or self._connection is None or not self._pending_rows:
+        if not self.enabled or self._connection is None:
+            return
+        if self._writer is not None:
+            from kojakstreet.core.persistence_writer import BatchTooLarge, RowBatch
+
+            self.check_persistence_health()
+            if self._pending_rows:
+                try:
+                    self._writer.submit(self._pending_rows, self._current_rows, self._pending_days)
+                except BatchTooLarge:
+                    # Oversized batches keep the original durable publication
+                    # barrier instead of growing the bounded journal/queue.
+                    batch = RowBatch.freeze(0, self._history_id, self._pending_rows,
+                                            self._current_rows, self._pending_days)
+                    self._writer.call(lambda raw: EconomicDataStore._write_row_batch(batch, raw))
+                self._pending_rows.clear()
+                self._pending_days.clear()
+            if not defer:
+                self.wait_for_persistence()
+            return
+        if not self._pending_rows:
             return
         connection = self._connection
         connection.execute("BEGIN TRANSACTION")
@@ -342,8 +479,11 @@ class EconomicDataStore:
                 self._replace_current_rows(table, rows)
             connection.execute("COMMIT")
             committed = True
-        except Exception:
-            connection.execute("ROLLBACK")
+        except Exception as error:
+            try:
+                connection.execute("ROLLBACK")
+            except Exception as rollback_error:  # noqa: BLE001 -- preserve ambiguous COMMIT failure
+                error.add_note(f"Rollback also failed: {rollback_error}")
             raise
         finally:
             if committed:
@@ -896,6 +1036,16 @@ class EconomicDataStore:
         assert self._connection is not None
         existing = self._connection.execute("SELECT value FROM history_metadata WHERE key='history_id'").fetchone()
         history_id = str(existing[0]) if existing else str(uuid.uuid4())
+        previous = dict(self._connection.execute(
+            "SELECT key, value FROM history_metadata WHERE key IN ('economic_model_version', 'history_schema_version')"
+        ).fetchall())
+        for key, value in previous.items():
+            current = ECONOMIC_MODEL_VERSION if key == "economic_model_version" else str(HISTORY_SCHEMA_VERSION)
+            if value != current:
+                self._connection.execute(
+                    "INSERT INTO history_metadata SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM history_metadata WHERE key=?)",
+                    [f"origin_{key}", value, f"origin_{key}"],
+                )
         values = {
             "history_id": history_id,
             "history_schema_version": str(HISTORY_SCHEMA_VERSION),
@@ -943,11 +1093,13 @@ class EconomicDataStore:
             "company_output_daily", "fund_allocation_daily", "news_events", "event_log", "phase_metric_daily"
         }
         for table in raw_tables:
-            self._connection.execute(f"DELETE FROM {_safe_identifier(table)} WHERE date < ?", [raw_cutoff])
+            self._connection.execute(
+                f"DELETE FROM {_safe_identifier(table)} WHERE date < DATE '{raw_cutoff.isoformat()}'"
+            )
         monthly_cutoff = date(max(1, reference.year - 20), 1, 1)
         self._connection.execute(
-            "DELETE FROM history_aggregate WHERE resolution='monthly' AND bucket_end < ?",
-            [monthly_cutoff],
+            "DELETE FROM history_aggregate WHERE resolution='monthly' "
+            f"AND bucket_end < DATE '{monthly_cutoff.isoformat()}'",
         )
 
     def _aggregate_spec(self, spec: tuple[str, str, str, str], resolution: str, completed: date, since: date | None) -> None:
@@ -955,22 +1107,29 @@ class EconomicDataStore:
         table, entity_expression, field, semantic = spec
         safe_table = _safe_identifier(table)
         safe_field = _safe_identifier(field)
+        semantic = SemanticType(semantic).value
+        if resolution not in {"monthly", "yearly"}:
+            raise ValueError(f"Unknown history resolution: {resolution}")
         bucket_start = "date_trunc('month', date)::DATE" if resolution == "monthly" else "make_date(year(date), 1, 1)"
         bucket_end = "last_day(date)" if resolution == "monthly" else "make_date(year(date), 12, 31)"
         lower_bound = since or date(1, 1, 1)
         sum_expression = f"sum({safe_field})" if semantic == SemanticType.FLOW.value else "0.0"
+        # These are validated schema identifiers, enum values and date objects,
+        # not external SQL text. Literal constants avoid six Python parameter
+        # conversions (and optional pandas probes) for every aggregation spec.
         self._connection.execute(
             f"""
             INSERT INTO history_aggregate
-            SELECT ?, CAST({entity_expression} AS VARCHAR) AS entity, ?, ?, ?,
+            SELECT '{safe_table}', CAST({entity_expression} AS VARCHAR) AS entity,
+                   '{safe_field}', '{semantic}', '{resolution}',
                    {bucket_start} AS bucket_start, {bucket_end} AS bucket_end,
                    arg_min({safe_field}, date), max({safe_field}), min({safe_field}), arg_max({safe_field}, date),
                    avg({safe_field}), {sum_expression}, count({safe_field})
             FROM {safe_table}
-            WHERE date <= ? AND date > ? AND {safe_field} IS NOT NULL
+            WHERE date <= DATE '{completed.isoformat()}'
+              AND date > DATE '{lower_bound.isoformat()}' AND {safe_field} IS NOT NULL
             GROUP BY bucket_start, bucket_end, entity
             """,
-            [table, field, semantic, resolution, completed, lower_bound],
         )
 
     def _upsert_structural_events(self, rows: list[tuple[Any, ...]]) -> None:
@@ -1008,10 +1167,51 @@ class EconomicDataStore:
         assert self._connection is not None
         if not rows:
             return
+        if table in {"politics_events", "country_politics_monthly"}:
+            # Sparse facts are identity-upserted, never date-wide deleted: an
+            # election replay must not erase a different country's same-day event.
+            indices = (1,) if table == "politics_events" else (0, 1)
+            unique = {tuple(row[i] for i in indices): row for row in rows}
+            if table == "politics_events":
+                # One statement, with safely quoted internal text values. Large
+                # Python-list parameters reintroduce per-element driver probes.
+                identities = ", ".join("'" + str(key[0]).replace("'", "''") + "'" for key in unique)
+                self._connection.execute(
+                    f"DELETE FROM politics_events WHERE event_id IN ({identities})"
+                )
+            else:
+                try:
+                    canonical = [(date.fromisoformat(str(key[0])).isoformat(),
+                                  str(key[1]).replace("'", "''")) for key in unique]
+                except ValueError:
+                    self._connection.execute(
+                        "DELETE FROM country_politics_monthly WHERE (date, region) IN "
+                        "(SELECT CAST(unnest(?) AS DATE), unnest(?))",
+                        [[str(key[0]) for key in unique], [key[1] for key in unique]],
+                    )
+                else:
+                    identities = ", ".join(f"(DATE '{when}', '{region}')" for when, region in canonical)
+                    self._connection.execute(
+                        "DELETE FROM country_politics_monthly WHERE (date, region) "
+                        f"IN (VALUES {identities})"
+                    )
+            self._insert_rows(table, list(unique.values()))
+            return
         safe_table = _safe_identifier(table)
         dates = sorted({str(row[0]) for row in rows})
-        placeholders = ", ".join("?" for _ in dates)
-        self._connection.execute(f"DELETE FROM {safe_table} WHERE date IN ({placeholders})", dates)
+        # Canonical ISO dates are internal schema values, not arbitrary SQL.
+        # Avoid DuckDB's repeated optional-import probes for Python parameters.
+        # Other input formats retain the original bound conversion/error path.
+        try:
+            canonical = all(date.fromisoformat(value).isoformat() == value for value in dates)
+        except ValueError:
+            canonical = False
+        if canonical:
+            literals = ", ".join(f"DATE '{value}'" for value in dates)
+            self._connection.execute(f"DELETE FROM {safe_table} WHERE date IN ({literals})")
+        else:
+            placeholders = ", ".join("?" for _ in dates)
+            self._connection.execute(f"DELETE FROM {safe_table} WHERE date IN ({placeholders})", dates)
         self._insert_rows(table, rows)
 
     def _replace_current_rows(self, table: str, rows: list[tuple[Any, ...]]) -> None:
@@ -1036,6 +1236,8 @@ class EconomicDataStore:
 
     def _drop_pending_date(self, date_text: str) -> None:
         for table, rows in list(self._pending_rows.items()):
+            if table in {"politics_events", "country_politics_monthly"}:
+                continue
             self._pending_rows[table] = [row for row in rows if str(row[0]) != date_text]
         self._pending_days.discard(date_text)
 
@@ -1044,20 +1246,33 @@ class EconomicDataStore:
         if not rows:
             return
         safe_table = _safe_identifier(table)
-        if table in {"news_events", "news_current", "event_log", "event_current", "phase_metric_daily", "phase_metric_current"}:
+        text_rows = table in {"news_events", "news_current", "event_log", "event_current"}
+        if text_rows and any(
+            type(value) not in (str, type(None), date, datetime) for row in rows for value in row
+        ):
             placeholders = ", ".join("?" for _ in rows[0])
             self._connection.executemany(f"INSERT INTO {safe_table} VALUES ({placeholders})", rows)
             return
         temp_path = None
+        parameter_rows = text_rows or table in {
+            "phase_metric_daily", "phase_metric_current",
+            "country_workforce_monthly", "country_workforce_current",
+            "country_politics_snapshot", "country_politics_current", "country_politics_monthly", "politics_events",
+        }
         try:
             with tempfile.NamedTemporaryFile("w", newline="", suffix=".csv", delete=False, encoding="utf-8") as handle:
                 temp_path = Path(handle.name)
-                writer = csv.writer(handle)
-                writer.writerows(rows)
+                if parameter_rows:
+                    self._write_parameter_csv(handle, rows)
+                else:
+                    writer = csv.writer(handle)
+                    writer.writerows(rows)
             sql_path = str(temp_path).replace("'", "''")
+            null_options = ", ALLOW_QUOTED_NULLS FALSE" if parameter_rows else ""
             self._connection.execute(
                 f"COPY {safe_table} FROM '{sql_path}' "
-                "(FORMAT CSV, HEADER FALSE, DELIM ',', QUOTE '\"', ESCAPE '\"', NULL '\\N')"
+                "(FORMAT CSV, HEADER FALSE, DELIM ',', QUOTE '\"', ESCAPE '\"', NULL '\\N'"
+                f"{null_options})"
             )
         finally:
             if temp_path is not None:
@@ -1065,6 +1280,22 @@ class EconomicDataStore:
                     temp_path.unlink()
                 except OSError:
                     pass
+
+    def _write_parameter_csv(self, handle, rows: list[tuple[Any, ...]]) -> None:
+        """Batch small parameter tables without per-cell optional-import probes.
+
+        Only None is an unquoted NULL marker. Quoting every non-null value also
+        preserves empty strings, literal \\N, quotes, newlines and Unicode.
+        DuckDB's target schema retains the existing DATE/VARCHAR/DOUBLE types.
+        """
+        for row in rows:
+            handle.write(
+                ",".join(
+                    "\\N" if value is None else '"' + str(value).replace('"', '""') + '"'
+                    for value in row
+                )
+                + "\n"
+            )
 
     def _asset_rows(self, daten_module, date_text: str) -> list[tuple[Any, ...]]:
         rows: list[tuple[Any, ...]] = []
@@ -1218,6 +1449,25 @@ class EconomicDataStore:
             )
         return rows
 
+    def _workforce_rows(self, daten_module) -> list[tuple[Any, ...]]:
+        from kojakstreet.core.workforce import POOLS
+
+        rows = []
+        for region, macro in getattr(daten_module, "makro", {}).items():
+            wf = macro.get("workforce")
+            if not wf:
+                continue
+            has_interval = wf["population_interval_years"] > 0
+            rows.append((
+                wf["last_aggregation_date"], str(region), wf["model_version"], wf["activated_on"],
+                float(macro["bevoelkerung"]), macro["birth_rate"], macro["death_rate"],
+                macro.get("population_growth") if has_interval else None,
+                wf["population_interval_years"], wf["population_interval_end"],
+                wf["population_growth_annualized"] if has_interval else None,
+                *(wf[metric][pool] for pool in POOLS for metric in ("supply", "demand", "coverage", "shortage")),
+            ))
+        return rows
+
     def _global_macro_rows(self, daten_module, date_text: str) -> list[tuple[Any, ...]]:
         return [
             (date_text, str(metric), _float(value))
@@ -1297,7 +1547,7 @@ class EconomicDataStore:
 
     def _news_rows(self, daten_module, date_text: str) -> list[tuple[Any, ...]]:
         rows = []
-        for raw in getattr(daten_module, "NEWS_SPEICHER", []):
+        for raw in visible_news(daten_module):
             if len(raw) < 3:
                 continue
             item_date, body, category = raw[:3]
@@ -1684,6 +1934,12 @@ def _specs(table: str, entity_expression: str, fields: dict[str, SemanticType]) 
 
 
 _HISTORY_SPECS = [
+    *_specs("country_workforce_monthly", "region", {
+        **{f"{pool}_{metric}": SemanticType.LEVEL if metric in {"supply", "demand"} else SemanticType.RATE
+           for pool in ("basic", "skilled", "highly_qualified")
+           for metric in ("supply", "demand", "coverage", "shortage")},
+        "population_growth_annualized": SemanticType.RATE,
+    }),
     *_specs("asset_daily", "asset_type || ':' || ticker", {
         "price": SemanticType.PRICE,
     }),
@@ -1775,6 +2031,14 @@ def _bounded_points(points: list[dict[str, object]], budget: int) -> list[dict[s
 
 
 _COLUMN_INDEXES = {
+    "country_workforce_monthly": {
+        "date": 0, "region": 1, "model_version": 2, "activated_on": 3, "population": 4,
+        "birth_rate": 5, "death_rate": 6, "population_growth": 7, "population_interval_years": 8,
+        "population_interval_end": 9, "population_growth_annualized": 10,
+        **{f"{pool}_{metric}": 11 + 4 * p + m
+           for p, pool in enumerate(("basic", "skilled", "highly_qualified"))
+           for m, metric in enumerate(("supply", "demand", "coverage", "shortage"))},
+    },
     "asset_daily": {
         "date": 0,
         "ticker": 1,

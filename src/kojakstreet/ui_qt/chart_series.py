@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Any
 
 from kojakstreet.core.ohlc import history_close, history_ohlc
@@ -37,6 +38,12 @@ def history_date(point: Any) -> str:
 
 def history_ordinal(point: Any) -> float | None:
     value = history_date(point).strip()
+    return _date_ordinal(value)
+
+
+@lru_cache(maxsize=4096)
+def _date_ordinal(value: str) -> float | None:
+    """Dates repeat across instruments; cache text, never mutable history points."""
     if not value:
         return None
     try:
@@ -83,6 +90,71 @@ def merge_history_by_date(*series: list[Any]) -> list[Any]:
         ),
     )
     return undated + [point for point, _ordinal, _date_text in ordered]
+
+
+def _invalidates_order(method):
+    def mutate(self, *args, **kwargs):
+        self._ordered = False
+        return method(self, *args, **kwargs)
+    return mutate
+
+
+class IncrementalHistory(list):
+    """UI-owned normalized history with O(1) chronological append/replace.
+
+    Points retain their original representation and are treated as immutable.
+    External list mutations invalidate the ordering proof. A newly loaded,
+    replaced or unordered list is normalized once before using the fast path.
+    """
+
+    __slots__ = ("_ordered", "_tail_ordinal")
+
+    def __init__(self, points=()):
+        super().__init__(merge_history_by_date(points))
+        self._remember_order()
+
+    def _remember_order(self):
+        self._tail_ordinal = history_ordinal(self[-1]) if self else None
+        self._ordered = True
+
+    def append_point(self, point: Any, *, limit: int = 0) -> None:
+        if not self._ordered:
+            list.__setitem__(self, slice(None), merge_history_by_date(self))
+            self._remember_order()
+        ordinal = history_ordinal(point)
+        if ordinal is not None and (not self or self._tail_ordinal is not None):
+            if not self or ordinal > self._tail_ordinal:
+                list.append(self, point)
+                self._tail_ordinal = ordinal
+            elif ordinal == self._tail_ordinal:
+                list.__setitem__(self, -1, point)
+            else:
+                self._merge_point(point)
+        else:
+            self._merge_point(point)
+        if limit > 0 and len(self) > limit:
+            list.__delitem__(self, slice(None, -limit))
+
+    def _merge_point(self, point):
+        list.__setitem__(self, slice(None), merge_history_by_date(self, [point]))
+        self._remember_order()
+
+    append = _invalidates_order(list.append)
+    extend = _invalidates_order(list.extend)
+    insert = _invalidates_order(list.insert)
+    pop = _invalidates_order(list.pop)
+    remove = _invalidates_order(list.remove)
+    clear = _invalidates_order(list.clear)
+    reverse = _invalidates_order(list.reverse)
+    sort = _invalidates_order(list.sort)
+    __setitem__ = _invalidates_order(list.__setitem__)
+    __delitem__ = _invalidates_order(list.__delitem__)
+    __iadd__ = _invalidates_order(list.__iadd__)
+    __imul__ = _invalidates_order(list.__imul__)
+
+
+def incremental_history(points: list[Any]) -> IncrementalHistory:
+    return points if isinstance(points, IncrementalHistory) else IncrementalHistory(points)
 
 
 def candle_bucket(range_points: int, point_count: int) -> tuple[int, str]:

@@ -32,6 +32,7 @@ from kojakstreet.ui_qt.models.simple_table_model import METADATA_ROLE, SimpleTab
 from kojakstreet.ui_qt.table_performance import optimize_table_view
 from kojakstreet.ui_qt.widgets.qt_chart import FastChartView
 from kojakstreet.ui_qt.widgets.view_header import ViewHeader
+from kojakstreet.ui_qt.widgets.society_politics_panel import SocietyPoliticsPanel
 
 
 class MacroView(QFrame):
@@ -42,11 +43,13 @@ class MacroView(QFrame):
         state: GameState,
         history_provider: Callable[[str, str, int], list[float]] | None = None,
         current_provider: Callable[[], list[dict[str, object]]] | None = None,
+        scope_provider=None,
     ) -> None:
         super().__init__()
         self.state = state
         self.history_provider = history_provider
         self.current_provider = current_provider
+        self.scope_provider = scope_provider
         self.current_country_rows: dict[str, dict[str, object]] = {}
         self.analytics = build_macro_analytics(state, include_trends=False)
         self.macro_table: QTableView | None = None
@@ -54,6 +57,8 @@ class MacroView(QFrame):
         self.pages = QStackedWidget()
         self.main_page = QWidget()
         self.detail_view = CountryDetailView(state, history_provider)
+        self.detail_view.scope_provider = scope_provider
+        self.detail_view.scope_changed = self._accept_detail_state
         self.metric_detail = RegionalMetricDetailPanel()
         self.setObjectName("Panel")
 
@@ -163,8 +168,14 @@ class MacroView(QFrame):
         if self.macro_table is not None:
             self._fill_macro_table(self.macro_table)
             self._select_region(selected_region)
-        if not throttle_charts and self.pages.currentWidget() is self.detail_view:
+        if not throttle_charts and self.pages.currentWidget() in {self.detail_view, self.metric_detail}:
             self.detail_view.refresh(state)
+            if self.pages.currentWidget() is self.metric_detail and self.detail_view._metric_selection:
+                kind, code = self.detail_view._metric_selection
+                codes = self.detail_view.production_codes if kind == "production" else self.detail_view.trade_codes
+                if code in codes:
+                    method = self.detail_view._open_production_metric if kind == "production" else self.detail_view._open_trade_metric
+                    method(codes.index(code))
 
     def apply_live_current_rows(self, rows: list[dict[str, object]]) -> None:
         if not rows:
@@ -246,7 +257,8 @@ class MacroView(QFrame):
                 target_row = row
                 break
         self.macro_model.ensure_row_loaded(target_row)
-        self.macro_table.selectRow(target_row)
+        if self.macro_table.currentIndex().row() != target_row:
+            self.macro_table.selectRow(target_row)
     def _macro_rows(self) -> list[list[str]]:
         rows = []
         for country in self.analytics.countries:
@@ -272,10 +284,19 @@ class MacroView(QFrame):
         self.detail_view.update_region(region, self.state)
         self.pages.setCurrentWidget(self.detail_view)
 
+    def _accept_detail_state(self, state):
+        self.state = state
+
     def _show_main_page(self) -> None:
         self.pages.setCurrentWidget(self.main_page)
+        if self.scope_provider is not None:
+            self.state = self.scope_provider({"view": "macro"})
+            self.detail_view._scope = None
 
     def _show_country_detail(self) -> None:
+        self.detail_view._metric_selection = None
+        self.detail_view._scope = None
+        self.detail_view.refresh(self.state)
         self.pages.setCurrentWidget(self.detail_view)
 
     def _show_metric_detail(self, title: str, subtitle: str, metrics: object) -> None:
@@ -378,6 +399,10 @@ class CountryDetailView(QFrame):
         self.state = state
         self.history_provider = history_provider
         self.region = ""
+        self.scope_provider = None
+        self.scope_changed = None
+        self._scope = None
+        self._metric_selection = None
         self.production_codes: list[str] = []
         self.trade_codes: list[str] = []
         self._current_macro: dict = {}
@@ -403,7 +428,7 @@ class CountryDetailView(QFrame):
 
         self.kpi_row = QHBoxLayout()
         self.kpi_values: dict[str, QLabel] = {}
-        for label in ["Rating", "Default Prob.", "Trade Balance", "Import Dep.", "Debt/GDP", "Credit Growth"]:
+        for label in ["Rating", "Default Prob.", "Trade Balance", "Import Dep.", "Debt/GDP", "Credit Growth", "Population"]:
             self.kpi_row.addWidget(self._kpi_card(label))
         layout.addLayout(self.kpi_row)
 
@@ -416,6 +441,8 @@ class CountryDetailView(QFrame):
         self.tabs.addTab(self._table_page(self.production_table), "Production")
         self.tabs.addTab(self._table_page(self.trade_table), "Trade")
         self.tabs.addTab(self._table_page(self.sector_table), "Sectors")
+        self.society_panel = SocietyPoliticsPanel()
+        self.tabs.addTab(self.society_panel, "Society && Politics")
         self.tabs.currentChanged.connect(lambda _index: self._refresh_active_tab())
         layout.addWidget(self.tabs, 1)
         self.production_table.clicked.connect(lambda index: self._open_production_metric(index.row()))
@@ -483,9 +510,21 @@ class CountryDetailView(QFrame):
         self.kpi_values["Import Dep."].setText(percent(float(macro.get("import_dependency", 0.0)) * 100))
         self.kpi_values["Debt/GDP"].setText(percent(float(macro.get("debt_to_gdp", 0.0)) * 100))
         self.kpi_values["Credit Growth"].setText(percent(float(macro.get("credit_growth", 0.0)) * 100))
+        self.kpi_values["Population"].setText(f"{float(macro.get('bevoelkerung', 0)):,.0f}")
         self._refresh_active_tab()
 
     def _refresh_active_tab(self) -> None:
+        if self.scope_provider is not None and self.region:
+            scope = {"view": "macro", "selection": {"region": self.region, "tab": self.tabs.currentIndex()}}
+            if self.tabs.currentIndex() == 4:
+                scope["selection"] = {"region": self.region, "area": "society_politics"}
+            if self._metric_selection:
+                scope["selection"]["code"] = self._metric_selection[1]
+            if scope != self._scope or (self.tabs.currentIndex() == 4 and "society_politics" not in self._current_macro):
+                self.state = self.scope_provider(scope)
+                self._scope = scope
+                self._current_macro = self.state.macro.get(self.region, {})
+                self.scope_changed(self.state)
         macro = getattr(self, "_current_macro", {})
         if not macro:
             return
@@ -498,6 +537,8 @@ class CountryDetailView(QFrame):
             self._fill_trade(macro)
         elif current_index == 3:
             self._fill_sectors(macro)
+        elif current_index == 4:
+            self.society_panel.apply_data(self.region, macro.get("population_society", {}), macro.get("society_politics", {}))
 
     def _fill_production(self, macro: dict) -> None:
         supply = macro.get("regional_supply", {})
@@ -612,6 +653,8 @@ class CountryDetailView(QFrame):
         if row < 0 or row >= len(self.production_codes):
             return
         code = self.production_codes[row]
+        self._metric_selection = ("production", code)
+        self._refresh_active_tab()
         macro = self.state.macro.get(self.region, {})
         history = macro.get("regional_history", {}).get(code, {})
         supply = macro.get("regional_supply", {})
@@ -633,6 +676,8 @@ class CountryDetailView(QFrame):
         if row < 0 or row >= len(self.trade_codes):
             return
         code = self.trade_codes[row]
+        self._metric_selection = ("trade", code)
+        self._refresh_active_tab()
         macro = self.state.macro.get(self.region, {})
         history = macro.get("regional_history", {}).get(code, {})
         exports = macro.get("exports", {})

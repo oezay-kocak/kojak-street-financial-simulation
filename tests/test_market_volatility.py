@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -122,7 +123,9 @@ def test_commodity_price_anchor_resists_broad_collapse_and_bubbles() -> None:
     assert expensive_signal < -0.10
 
 
-def test_open_interest_tracks_perpetual_positioning() -> None:
+@pytest.mark.parametrize("asset_type", ("Stock", "Commodity", "Crypto"))
+@pytest.mark.parametrize("direction", ("LONG", "SHORT"))
+def test_open_interest_preserves_npc_positioning_and_ignores_retail_positions(asset_type, direction) -> None:
     asset = {
         "kurs": 100.0,
         "market_cap": 1_000_000.0,
@@ -130,10 +133,15 @@ def test_open_interest_tracks_perpetual_positioning() -> None:
         "short_interest": 16_000.0,
         "historie": [(100.0, "", ""), (104.0, "", "")],
     }
-    state = SimpleNamespace(perpetuals={"AAA_LONG": {"ticker": "AAA", "typ": "LONG", "groesse": 10.0}})
+    expected_asset = deepcopy(asset)
+    expected = market_calculations._update_open_interest(
+        SimpleNamespace(perpetuals={}), "AAA", expected_asset, asset_type, 0.55,
+    )
+    state = SimpleNamespace(perpetuals={"RETAIL": {"ticker": "AAA", "typ": direction, "groesse": 1e12}})
 
-    result = market_calculations._update_open_interest(state, "AAA", asset, "Stock", 0.55)
+    result = market_calculations._update_open_interest(state, "AAA", asset, asset_type, 0.55)
 
+    assert asset == expected_asset and result == expected
     assert asset["long_interest"] > asset["short_interest"]
     assert asset["open_interest"] == pytest.approx(asset["long_interest"] + asset["short_interest"])
     assert asset["open_interest_history"][-1] == pytest.approx((asset["long_interest"], asset["short_interest"]))

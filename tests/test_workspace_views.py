@@ -151,7 +151,10 @@ def test_macro_view_live_rows_refresh_open_country_detail(monkeypatch) -> None:
 
     assert calls == ["refresh"]
     assert view.detail_view.region == table.model().index(0, 0).data()
-    assert view.detail_view.tabs.count() == 4
+    assert view.detail_view.tabs.count() == 5
+    assert [view.detail_view.tabs.tabText(i).replace("&&", "&") for i in range(5)] == [
+        "Overview", "Production", "Trade", "Sectors", "Society & Politics",
+    ]
 
     view.detail_view.tabs.setCurrentIndex(1)
     view.detail_view._open_production_metric(0)

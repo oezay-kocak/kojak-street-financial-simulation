@@ -6,6 +6,7 @@ from collections.abc import MutableMapping
 from datetime import UTC, datetime
 from typing import Any
 
+from kojakstreet.core.checkpoints import VERSION as CURRENT_SAVE_VERSION
 from kojakstreet.core.financial_products import (
     CDS_CONTRACT_SCALE,
     CDS_CONTRACT_TYPES,
@@ -14,8 +15,6 @@ from kojakstreet.core.financial_products import (
 from kojakstreet.core.global_macro import ensure_global_macro
 from kojakstreet.core.label_codes import attach_stable_label_codes
 from kojakstreet.core.market_regime import update_market_regime
-
-CURRENT_SAVE_VERSION = 6
 
 
 def migrate_save_payload(payload: dict[str, Any]) -> dict[str, Any]:

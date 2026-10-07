@@ -382,10 +382,12 @@ def _same_market_shape(current_rows: list[dict[str, Any]], next_rows: list[dict[
 
 def _update_existing_market_rows(rows: list[dict[str, Any]], state: GameState, watchlist: set[str]) -> bool:
     service = MarketDataService(state)
-    if not rows:
+    if not rows or len(rows) != sum(len(book) for _, book in service.asset_books()):
         return False
     for row in rows:
-        quote = service.quote(row["ticker"])
+        quote = service.quote(
+            row["ticker"], asset_type="Index" if row["asset_type"] == "Index" else None
+        )
         if quote is None or quote.asset_type != row["asset_type"]:
             return False
         data = quote.data

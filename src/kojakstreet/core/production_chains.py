@@ -508,8 +508,13 @@ def ensure_country_economies(daten: ModuleType) -> None:
 
 
 def update_population(daten: ModuleType) -> None:
+    from kojakstreet.core.workforce import advance_population
+
     ensure_population(daten)
     for country in daten.makro.values():
+        if "workforce" in country:
+            advance_population(country, 1.0 / 12.0, floor=2_000_000.0, when=daten.datum.date())
+            continue
         growth = float(country.get("bip_prozent", 0.0))
         unemployment = float(country.get("arbeitslosigkeit", 0.06))
         monthly = _clamp((growth - 0.005) * 0.025 - max(0.0, unemployment - 0.08) * 0.010, -0.0025, 0.0035)
@@ -948,6 +953,8 @@ def _update_country_trade_flows(
     company_rows = company_rows if company_rows is not None else company_runtimes(daten)
     company_market_exposures = company_market_exposures or _company_market_exposures(daten, company_rows)
     main_sector_by_country = main_country_sectors(company_rows)
+    # Country profiles/ratings stay fixed throughout this aggregation.
+    country_bonuses = {}
 
     def append_history(target: dict, key: str, value: float) -> None:
         history = target.setdefault(key, [])
@@ -960,8 +967,12 @@ def _update_country_trade_flows(
         country = row.country
         if country not in supply_by_country:
             continue
-        capacity = max(1.0, float(asset.get("production_capacity", _company_capacity(asset))))
-        country_bonus = _country_sector_bonus(daten, country, row.sector)
+        capacity = max(1.0, float(asset["production_capacity"] if "production_capacity" in asset else _company_capacity(asset)))
+        bonus_key = (country, row.sector)
+        country_bonus = country_bonuses.get(bonus_key)
+        if country_bonus is None:
+            country_bonus = _country_sector_bonus(daten, country, row.sector)
+            country_bonuses[bonus_key] = country_bonus
         for code, share, _market in exposures:
             supply_by_country[country][code] += capacity * share * country_bonus
 
@@ -1252,6 +1263,10 @@ def _update_company_utilization(
 ) -> None:
     company_rows = company_rows if company_rows is not None else company_runtimes(daten)
     company_market_exposures = company_market_exposures or _company_market_exposures(daten, company_rows)
+    # These market measures are read-only during company utilization. Keep the
+    # cache within this call, and do not cache an aliased company/market object.
+    company_ids = {id(row.asset) for row in company_rows}
+    market_measures = {}
     for row, exposures in company_market_exposures:
         asset = row.asset
         weighted_utilization = 0.0
@@ -1259,12 +1274,23 @@ def _update_company_utilization(
         weighted_input_availability = 0.0
         weighted_pricing_power = 0.0
         for _code, share, market in exposures:
-            demand = max(1.0, float(market.get("demand", 100.0)))
-            supply = max(1.0, float(market.get("supply", market.get("production", 100.0))))
-            weighted_utilization += _clamp(demand / supply, 0.35, 1.25) * share
-            weighted_shortage += float(market.get("shortage", 0.0)) * share
-            weighted_input_availability += float(market.get("input_availability", 1.0)) * share
-            weighted_pricing_power += float(market.get("price_pressure", 0.0)) * share
+            identity = id(market)
+            measures = market_measures.get(identity)
+            if measures is None:
+                demand = max(1.0, float(market.get("demand", 100.0)))
+                supply = max(1.0, float(market.get("supply", market.get("production", 100.0))))
+                measures = (
+                    _clamp(demand / supply, 0.35, 1.25),
+                    float(market.get("shortage", 0.0)),
+                    float(market.get("input_availability", 1.0)),
+                    float(market.get("price_pressure", 0.0)),
+                )
+                if identity not in company_ids:
+                    market_measures[identity] = measures
+            weighted_utilization += measures[0] * share
+            weighted_shortage += measures[1] * share
+            weighted_input_availability += measures[2] * share
+            weighted_pricing_power += measures[3] * share
         utilization = weighted_utilization
         shortage = weighted_shortage
         input_availability = weighted_input_availability

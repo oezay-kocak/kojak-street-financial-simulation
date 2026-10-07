@@ -7,8 +7,13 @@ from collections.abc import Callable
 from types import ModuleType
 
 from kojakstreet.core.commodities import update_commodity_fundamentals
-from kojakstreet.core.cryptos import shutdown_and_replace_crypto_chains, update_crypto_economy, update_crypto_fundamentals
+from kojakstreet.core.cryptos import (
+    shutdown_and_replace_crypto_chains,
+    update_crypto_economy,
+    update_crypto_fundamentals,
+)
 from kojakstreet.core.ohlc import normalize_commodity_supply_key
+from kojakstreet.core.player_accounting import player_uniform
 from kojakstreet.core.psychology import update_asset_expectations
 
 NewsCallback = Callable[[str, str], None]
@@ -56,11 +61,14 @@ def update_monthly_crypto(daten: ModuleType, macro_growth: float, world_rate: fl
             event_result=result,
         )
         update_asset_expectations(asset, "Crypto")
-        if ticker in daten.depot:
+        frame = getattr(daten, "_player_day_frame", None)
+        if frame is not None:
+            frame.events.append(("crypto_fee", ticker, asset.get("gebuehren", asset.get("chain_fees", 0.0)) / 1_000_000.0, "GD"))
+        elif ticker in daten.depot:
             daten.forex_depot["GD"] = daten.forex_depot.get("GD", 0.0) + (
                 (asset.get("gebuehren", asset.get("chain_fees", 0.0)) / 1_000_000.0)
                 * daten.depot[ticker]["stueck"]
-                * random.uniform(0.01, 0.03)
+                * player_uniform(daten, 0.01, 0.03)
             )
 
 

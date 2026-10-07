@@ -1,15 +1,17 @@
 # DATEI: daten.py START
-from datetime import datetime
 import os
 import sys
+from datetime import datetime
 
-from kojakstreet.core.companies import BRANCHEN as GENERATED_BRANCHEN, ensure_company_universe
+from kojakstreet.core.companies import BRANCHEN as GENERATED_BRANCHEN
+from kojakstreet.core.companies import ensure_company_universe
 from kojakstreet.core.countries import COUNTRY_SYMBOLS, RESERVE_CURRENCY, RESERVE_CURRENCY_SYMBOL
 from kojakstreet.core.cryptos import ensure_crypto_universe
 from kojakstreet.core.expectations import ensure_macro_expectations
 from kojakstreet.core.financial_products import ensure_financial_product_universe
 from kojakstreet.core.fiscal import ensure_country_financials
 from kojakstreet.core.funds import ensure_fund_universe
+from kojakstreet.core.heterogeneous_start import initialization_roots
 from kojakstreet.core.indices import ensure_index_universe
 from kojakstreet.core.label_codes import attach_stable_label_codes
 from kojakstreet.core.market_regime import update_market_regime
@@ -19,6 +21,7 @@ from kojakstreet.core.production_chains import (
     ensure_processed_products,
     update_production_chain,
 )
+from kojakstreet.core.workforce import initialize as initialize_workforce
 
 LAENDER = dict(COUNTRY_SYMBOLS)
 WAEHRUNGEN = {**LAENDER, RESERVE_CURRENCY: RESERVE_CURRENCY_SYMBOL}
@@ -32,7 +35,7 @@ BRANCHEN = GENERATED_BRANCHEN
 
 ROHSTOFFE_KAT = COMMODITY_GROUPS
 
-datum = datetime(1990, 1, 1)
+datum = datetime(1990, 1, 1)  # noqa: DTZ001 - legacy simulation dates are deliberately naive.
 bargeld = 0.0
 kredite = {currency: 0.0 for currency in WAEHRUNGEN}
 depot = {}
@@ -64,7 +67,11 @@ def _resource_path(filename):
 
 
 aktien = {}
-ensure_company_universe(sys.modules[__name__], reset=True)
+_initial_roots = initialization_roots.get()
+ensure_company_universe(
+    sys.modules[__name__], reset=True,
+    initial_caps=_initial_roots.company_caps if _initial_roots is not None else None,
+)
 
 rohstoffe = {}
 for kat, items in ROHSTOFFE_KAT.items():
@@ -99,14 +106,14 @@ ensure_index_universe(sys.modules[__name__])
 makro = {}
 for country in LAENDER:
     makro[country] = {
-        "bip_abs": 5000.0,
+        "bip_abs": _initial_roots.gdp[country] if _initial_roots is not None else 5000.0,
         "bip_prozent": 0.010,
         "zins": 0.035,
         "inflation": 0.010,
         "arbeitslosigkeit": 0.060,
         "balance_sheet": 1000.0,
         "rating": "BBB",
-        "bevoelkerung": 20_000_000.0,
+        "bevoelkerung": float(_initial_roots.population[country]) if _initial_roots is not None else 20_000_000.0,
         "population_growth": 0.0,
     }
 ensure_population(sys.modules[__name__])
@@ -125,7 +132,7 @@ LETZTER_REPORT_MONAT = -1
 MAKRO_HISTORIE = {}
 for country in LAENDER:
     MAKRO_HISTORIE[f"{country}_ZINS"] = [(0.035, "01.01.1990", "")]
-    MAKRO_HISTORIE[f"{country}_BIP"] = [(5000.0, "01.01.1990", "")]
+    MAKRO_HISTORIE[f"{country}_BIP"] = [(makro[country]["bip_abs"], "01.01.1990", "")]
     MAKRO_HISTORIE[f"{country}_INF"] = [(0.010, "01.01.1990", "")]
     MAKRO_HISTORIE[f"{country}_ALO"] = [(0.060, "01.01.1990", "")]
     MAKRO_HISTORIE[f"{country}_BS"] = [(1000.0, "01.01.1990", "")]
@@ -170,4 +177,6 @@ for asset_group in (aktien, rohstoffe, kryptos, fonds, indizes, derivatives):
     for asset in asset_group.values():
         asset["historie"] = []
 update_production_chain(sys.modules[__name__], advance_population=False)
+initialize_workforce(sys.modules[__name__])
+del _initial_roots
 # DATEI: daten.py ENDE

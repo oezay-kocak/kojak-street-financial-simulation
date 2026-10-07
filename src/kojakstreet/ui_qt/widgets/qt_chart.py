@@ -84,6 +84,9 @@ class FastChartView(QWidget):
         self._chart_kind = ""
         self._series_items: list[Any] = []
         self._primary_glow: Any = None
+        self._line_schema = ()
+        self._legend_entries = ()
+        self._candle_item = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -139,8 +142,28 @@ class FastChartView(QWidget):
         self.plot_lines([(label, values, color)], title=title, legend=True, dates=dates)
 
     def plot_lines(self, series_specs: list[tuple[str, list[float], str] | tuple[str, list[float], str, str]], *, title: str = "", legend: bool = False, dates: list[Any] | None = None) -> None:
+        valid = [spec for spec in series_specs if len(spec[1]) >= 2]
+        schema = tuple((str(spec[0]), str(spec[3]) if len(spec) >= 4 else self._series_role(str(spec[0]))) for spec in valid)
+        if schema and self._chart_kind == "line" and schema == self._line_schema:
+            x_values = self._x_values(dates, max(len(spec[1]) for spec in valid))
+            for item, spec, (_label, role) in zip(self._series_items, valid, schema, strict=True):
+                values, color = spec[1], str(spec[2])
+                item.setData(x_values[-len(values):], values, pen=self._series_pen(color, role),
+                             fillLevel=min(values) if role == "primary" else None,
+                             brush=self._area_brush(color) if role == "primary" else None)
+                if role == "primary" and self._primary_glow is not None:
+                    self._primary_glow.setData(x_values[-len(values):], values, pen=pg.mkPen(_alpha_color(color, 48), width=8, cosmetic=True))
+            self._current_title = title or self._title or "Chart"
+            self.plot.setTitle(self._current_title, color="#e5eef8", size="10pt")
+            self._fit_range([value for spec in valid for value in spec[1]])
+            self._set_legend([(str(spec[0]), str(spec[2]), role == "average") for spec, (_label, role) in zip(valid, schema, strict=True)] if legend else [])
+            if dates:
+                values = valid[0][1]
+                self._set_hover_points(x_values[-len(values):], values, dates[-len(values):])
+            return
         self._clear(title or self._title or "Chart")
         self._chart_kind = "line"
+        self._line_schema = schema
         self.legend_labels = [str(spec[0]) for spec in series_specs if len(spec[1]) >= 2] if legend else []
         if legend:
             self._set_legend(
@@ -229,8 +252,14 @@ class FastChartView(QWidget):
         title: str = "Price History",
         overlays: list[tuple[str, list[float], str]] | None = None,
     ) -> None:
-        self._clear(title)
+        schema = tuple(label for label, values, _color in (overlays or []) if len(values) >= 2)
+        reuse = self._chart_kind == "candle" and getattr(self, "_candle_schema", None) == schema
+        if not reuse:
+            self._clear(title)
         self._chart_kind = "candle"
+        self._candle_schema = schema
+        self._current_title = title
+        self.plot.setTitle(title, color="#e5eef8", size="10pt")
         candles, interval = build_candles(values, range_points)
         self.last_candle_count = len(candles)
         self.last_candle_interval = interval
@@ -238,22 +267,32 @@ class FastChartView(QWidget):
             self.show_message("History builds as the simulation runs")
             return
         x_values = self._x_values([candle.date for candle in candles], len(candles))
-        item = CandlestickItem([(x_values[index], candle.open, candle.close, candle.low, candle.high) for index, candle in enumerate(candles)])
-        self.plot.addItem(item)
+        candle_data = [(x_values[index], candle.open, candle.close, candle.low, candle.high) for index, candle in enumerate(candles)]
+        if reuse and self._candle_item is not None:
+            self._candle_item.prepareGeometryChange()
+            self._candle_item.data = candle_data
+            self._candle_item.generate_picture()
+            self._candle_item.update()
+        else:
+            self._candle_item = CandlestickItem(candle_data)
+            self.plot.addItem(self._candle_item)
         self.legend_labels = []
         self._set_legend(
             [("Price", "#14b8a6", False)]
             + [(label, color, True) for label, _overlay_values, color in (overlays or [])]
         )
         if overlays:
+            overlay_index = 0
             for label, overlay_values, color in overlays:
                 if len(overlay_values) < 2:
                     continue
-                overlay = self.plot.plot(
-                    x_values[-len(overlay_values) :],
-                    overlay_values,
-                    pen=self._series_pen(color, "average"),
-                )
+                if reuse:
+                    overlay = self._series_items[overlay_index]
+                    overlay.setData(x_values[-len(overlay_values):], overlay_values, pen=self._series_pen(color, "average"))
+                else:
+                    overlay = self.plot.plot(x_values[-len(overlay_values):], overlay_values, pen=self._series_pen(color, "average"))
+                    self._series_items.append(overlay)
+                overlay_index += 1
                 overlay.setDownsampling(auto=True, method="peak")
                 overlay.setClipToView(True)
                 self.legend_labels.append(label)
@@ -371,6 +410,8 @@ class FastChartView(QWidget):
         self._chart_kind = ""
         self._series_items = []
         self._primary_glow = None
+        self._candle_item = None
+        self._line_schema = ()
         self._hover_points = []
         self._hover_label = None
         self._hover_line = None
@@ -458,6 +499,9 @@ class FastChartView(QWidget):
         self.plot.setYRange(lower - padding, upper + padding, padding=0.0)
 
     def _set_legend(self, entries: list[tuple[str, str, bool]]) -> None:
+        if tuple(entries) == self._legend_entries:
+            return
+        self._legend_entries = tuple(entries)
         while self.legend_layout.count():
             item = self.legend_layout.takeAt(0)
             if item.widget() is not None:

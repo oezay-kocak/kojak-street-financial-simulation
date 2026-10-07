@@ -180,7 +180,8 @@ class GlobalMacroView(QFrame):
                 self.table_model.ensure_row_loaded(row)
                 selection_model = self.table.selectionModel()
                 selection_model.blockSignals(True)
-                self.table.selectRow(row)
+                if self.table.currentIndex().row() != row:
+                    self.table.selectRow(row)
                 selection_model.blockSignals(False)
                 return
 
@@ -221,6 +222,10 @@ class GlobalMacroView(QFrame):
             self.pages.setCurrentWidget(self.detail_view)
 
     def _update_detail(self, key: str) -> None:
+        provider = getattr(self, "scope_provider", None)
+        if provider is not None and getattr(self, "_scope_metric", None) != key:
+            self.state = provider({"view": "global_macro", "selection": {"metric": key}})
+            self._scope_metric = key
         if key == "yield_curve_3y10y":
             history = [
                 (float(self.state.global_macro.get("avg_3y_yield", 0.0)) * 100.0, "", ""),
@@ -259,6 +264,10 @@ class GlobalMacroView(QFrame):
 
     def _show_macro_list(self) -> None:
         self.pages.setCurrentWidget(self.main_page)
+        provider = getattr(self, "scope_provider", None)
+        if provider is not None:
+            self.state = provider({"view": "global_macro"})
+            self._scope_metric = None
 
     def _history_values(self, key: str) -> list[float]:
         values = []

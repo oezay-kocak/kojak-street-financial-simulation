@@ -11,14 +11,14 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = 6
-SUPPORTED_VERSIONS = {4, 5, VERSION}
+VERSION = 9
+SUPPORTED_VERSIONS = {4, 5, 6, 7, 8, VERSION}
 # These caches contain live object references, not independent numerical state.
 # JSON cannot preserve that identity. Rebuild them from holdings after restore.
 REFERENCE_CACHE_KEYS = frozenset({"_resolved_underlyings", "_fund_pressure_targets"})
 FIELDS = frozenset("""
 LAENDER WAEHRUNGEN RATINGS BRANCHEN ROHSTOFFE_KAT datum bargeld kredite depot
-perpetuals anleihen spiel_pausiert SPIEL_AKTIV turbo_modus intervall aktives_event
+perpetuals anleihen player_rng_state PLAYER_NEWS_SPEICHER spiel_pausiert SPIEL_AKTIV turbo_modus intervall aktives_event
 event_dauer NEWS_SPEICHER anzeige_waehrung waehrungen_staerke forex_depot aktien
 rohstoffe processed_products kryptos fonds indizes derivatives makro
 FOREX_PAARE_HISTORIE LETZTER_ZINS_TAG LETZTER_REPORT_MONAT MAKRO_HISTORIE
@@ -28,12 +28,16 @@ last_bond_issue_year last_need_based_bond_issue_month derivative_universe_comple
 market_regime market_psychology bond_market_refresh_cursor bond_market_archive
 bond_market_archive_count retired_company_tickers simulation_seed
     handels_tage_zaehler last_completed_simulation_date last_bond_market_update_ordinal
-    economic_shocks structural_event_state extreme_tail_events extreme_tail_seen world_generation
+    economic_shocks structural_event_state extreme_tail_events extreme_tail_seen world_generation politics_calendar
 """.split())
 REQUIRED = {"datum", "aktien", "rohstoffe", "kryptos", "makro", "depot", "forex_depot", "bargeld"}
 
 
 def encode(value):
+    # Exact built-in types only: NumPy scalars must still use .item(), and
+    # subclasses retain the existing fallbacks below.
+    if value is None or type(value) in (str, bool, int, float):
+        return value
     if isinstance(value, datetime):
         return {"__type__": "datetime", "value": value.isoformat()}
     if isinstance(value, np.ndarray):
@@ -94,6 +98,24 @@ def restore(state, payload):
     for book in ("aktien", "rohstoffe", "kryptos", "makro", "depot"):
         if not all(isinstance(v, dict) for v in world[book].values()):
             raise ValueError(f"Invalid checkpoint entries: {book}")
+    metadata = world.get("world_generation", {})
+    if isinstance(metadata, dict) and metadata.get("mode") == "HETEROGENEOUS":
+        from kojakstreet.core.heterogeneous_start import validate_saved_initialization
+        validate_saved_initialization(metadata, world.get("simulation_seed"))
+    from kojakstreet.core.workforce import validate_country
+
+    for country, macro in world["makro"].items():
+        if any(key in macro for key in ("workforce", "birth_rate", "death_rate")):
+            validate_country(macro)
+        if "politics" in macro:
+            from kojakstreet.core.politics import validate
+            validate(macro["politics"], as_of=world["datum"], country=country)
+    if "politics_calendar" in world:
+        calendar_state = world["politics_calendar"]
+        due = [m["politics"][key] for m in world["makro"].values() if "politics" in m
+               for key in ("next_election", "next_review") if m["politics"][key]]
+        if calendar_state != {"next_due": min(due) if due else None}:
+            raise ValueError("Invalid political calendar")
     session = payload.get("analytics_session", {})
     if not isinstance(session, dict) or set(session) - {"product_daily", "bond_daily", "manifest", "recent_rows"}:
         raise ValueError("Invalid checkpoint analytics")
@@ -112,6 +134,10 @@ def restore(state, payload):
     rng = payload["rng"]
     random.Random().setstate(rng["python"])
     np.random.RandomState().set_state(rng["numpy"])
+    if "player_rng_state" in world:
+        random.Random(0).setstate(world["player_rng_state"])
+    if "PLAYER_NEWS_SPEICHER" in world and not isinstance(world["PLAYER_NEWS_SPEICHER"], list):
+        raise ValueError("Invalid player news checkpoint")
     for key in list(vars(state)):
         if key in FIELDS or (key.startswith("_") and not key.startswith("__")) or key in {"market_runtime_assets", "market_runtime_index", "bond_market_by_symbol", "bond_market_symbol_signature", "simulation_phase_timings"}:
             delattr(state, key)

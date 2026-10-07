@@ -69,6 +69,7 @@ def test_live_process_is_deterministic_responsive_and_save_load_safe(tmp_path) -
         process.load_game()
 
         ticker = next(iter(process.state.stocks))
+        process.sync_visible_scope({"view": "markets", "selection": {"kind": "Stock", "ticker": ticker, "tab": "chart"}})
         validation = process.validate_trade(ticker, "SPOT", "BUY", 1.0, 1)
         assert validation.is_valid
         process.trade_spot(ticker, 1.0, "BUY")

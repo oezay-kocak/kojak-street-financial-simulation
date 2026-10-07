@@ -169,7 +169,7 @@ def test_fast_history_is_deterministic_seeded_and_reaches_player_start(tmp_path)
                 pixel_budget=1200,
                 semantic_type="price",
             )
-            assert metadata["generation"]["strategy"] == "fast_history_v2"
+            assert metadata["generation"]["strategy"] == "fast_history_v3"
             assert metadata["generation"]["daily_burn_in_days"] == 5
             assert points[0]["date"][:4] == "1990"
             assert points[-1]["date"][:4] == "2040"
