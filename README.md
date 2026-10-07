@@ -1,19 +1,106 @@
 # Kojak Street
 
-A desktop economic and financial-market simulation built with Python, PySide6,
-pyqtgraph and DuckDB. Explore how macro conditions, production bottlenecks,
-company fundamentals, credit and market psychology affect fictional markets
-and a trading portfolio.
+A working desktop simulation for exploring how economies, companies and financial markets interact—and managing a trading portfolio inside that fictional world.
 
-This is a portfolio project at the intersection of banking, business analysis,
-product development and AI-assisted software engineering. It is a synthetic
-learning environment, not an investment tool or a professionally calibrated
-forecasting or pricing model.
+![Markets: live quotes, company drivers, price history and trading controls](docs/assets/markets.png)
 
-## Start here
+## What is Kojak Street?
 
-Use **Python 3.11 or 3.12**. Python 3.12 is the locally verified environment;
-the CI workflow also targets 3.11. From a checkout, on Windows PowerShell:
+Kojak Street combines a financial terminal with an evolving economic world. Follow a country's inflation and interest rates, inspect a company's fundamentals and supply chain, compare financial instruments, and see how your positions develop over time. The application generates its own countries, companies, prices and events; it uses no live market feed.
+
+The initial world contains **20 countries, 16 sectors and 1,280 companies**, plus **34 raw resources and 90 products/services**. Markets include equities, country and sector indices, funds/ETFs, FX, government and corporate bonds, crypto assets and derivatives. These are starting-world counts; companies and instruments can change during play.
+
+**Status: Feature Complete / Feature Freeze for the current portfolio scope.** The supported application is the Python/Qt desktop version. Start with the [installation instructions](#installation-and-first-run), or read the [case study](docs/project_background.md) for the development journey.
+
+## Why I built it
+
+I am Özay Kocak, a trained banker with experience in customer service and financial advisory work. During a career break and personal learning period, I wanted to turn my interest in economics, politics and financial markets into something people could explore.
+
+The first idea was a small stock-market game. It grew through requirements-driven iteration into a broader simulation and a practical learning project in software and product development. AI-assisted tools supported planning, implementation, debugging and testing. I remained responsible for the product direction, economic concepts, requirements, hypotheses, validation and trade-offs. The [case study](docs/project_background.md) explains that work with concrete examples.
+
+## What you can explore
+
+| Area | In the application |
+| --- | --- |
+| Countries and macroeconomics | Growth, inflation, rates, unemployment, fiscal and monetary conditions, credit ratings, expectations and market psychology |
+| Companies and production | Revenue, free cash flow, debt, distress, production recipes, inventories, shortages and regional trade |
+| Markets and credit | Equities, indices, fund flows, FX, sovereign/corporate bonds, options, futures, forwards, swaps and CDS |
+| Portfolio | Spot and leveraged long/short positions, FX balances, valuation, PnL, margin, liquidation and settlement |
+| Society | Population, birth/death rates and realized growth; Basic, Skilled and Highly Qualified workforce supply, company demand and coverage |
+| Politics V1 | Seven government systems, parties, competitive elections where applicable, government/coalition formation, descriptive economic/social ideology axes and political stability |
+| History | Price charts, country/product analytics, structural events, checkpoints and persistent economic history |
+
+Workforce shortages have a bounded **monthly** company effect. Headline unemployment remains a separate macroeconomic measure; workforce coverage is not an unemployment rate. Politics uses monthly and event-based updates with sparse history. Its proposed government-bond risk premium is **disabled** because the historical bond/curve/fund/derivative consistency gate was not satisfied.
+
+The player is a **retail investor**: ordinary trades and holdings do not move the world economy or global prices. Portfolio accounting, payouts, margin and settlement remain active. Simulated institutional fund flows still belong to the world's price formation.
+
+## Three starting worlds
+
+The chooser labels are **GENESIS WORLD**, **HETEROGENEOUS WORLD** and **ESTABLISHED WORLD**.
+
+| Mode | Starting experience |
+| --- | --- |
+| Genesis | A common, symmetric macro and company-size baseline on Day 1. Individual company attributes and subsequent outcomes still vary. |
+| Heterogeneous | Controlled country population/GDP/productivity and company-size diversity on Day 1. Initial global budgets are preserved; no pre-simulation history is invented. |
+| Established | 50, 75 or 100 years of generated historical development before the player enters. A coarse yearly/monthly historical model is followed by **365 real daily simulation steps** as burn-in. |
+
+Established is a hybrid historical generator, not decades of the full daily production engine. It runs in a separate process and produces a verified world bundle. Generation can be cancelled and restarted; partial-generation resume is outside the current scope.
+
+## Selected product views
+
+All six documentation images come from the current application: Heterogeneous World, seed 1729, after 75 actual daily steps, on **17 March 1990**. The portfolio contains a real small spot purchase. The politics image correctly labels the initial mandate allocation; no election has yet occurred in that country.
+
+| Company fundamentals | Country history |
+| --- | --- |
+| ![Company price, fundamentals and credit information](docs/assets/company-detail.png) | ![Country macroeconomic charts](docs/assets/country.png) |
+
+![Society and Politics: demographics, workforce coverage, government and initial mandates](docs/assets/society-politics.png)
+
+| Production and supply chains | Portfolio and exposure |
+| --- | --- |
+| ![Resource production, demand, inventories and pressure](docs/assets/supply-chain.png) | ![A real spot holding with valuation and PnL](docs/assets/portfolio.png) |
+
+## How it works
+
+Python implements the economic model; PySide6 and pyqtgraph provide the desktop interface; DuckDB stores analytical history. Normal startup gives a separate live process ownership of one mutable world. The interface receives global status, current rows for its active view and details requested for the selected entity or tab. It requests deeper chart history separately.
+
+```mermaid
+flowchart LR
+    G[World generation] --> W[Live worker: economic world and player accounting]
+    U[Qt desktop UI] -->|Commands and visible scope| W
+    W -->|Current visible state| U
+    W -->|Immutable rows and durable journal| P[Single ordered writer]
+    P --> D[(DuckDB history)]
+    D -->|Requested history| W
+```
+
+Economic, initialization and player-specific random streams have explicit boundaries. Workforce and politics add monthly/event state without restoring a daily mirror of every hidden view. **Speculative next-day precomputation is not enabled**: its isolated prototype failed the sustained cost/readiness test. See [architecture](docs/architecture.md) for modules and boundaries.
+
+## Performance engineering
+
+Visible stutter led to measurement of the whole transition, including state preparation, history, transfer, rendering and persistence. Broad synchronization was doing substantial work for data the player was not viewing. On-demand projection, bounded chart updates, cached lookups and a durable ordered writer addressed those measured costs.
+
+One matched **native Windows, mature-world** on-demand comparison reduced ordinary-day transition median from **2,271 ms to 445 ms**; the after series contained 37 ordinary days. A later matched native pass measured **398 ms to 291 ms** across its own 37 ordinary-day samples. These are separate experiments, not one combined speedup.
+
+The latest Politics control used **headless runtime execution with persistence active** over 90 consecutive days: ordinary-day median was approximately **161 ms**, the monthly politics phase **0.263 ms**, and one election phase **0.403 ms**. These measure different boundaries from native GUI latency. Report days, flushes, cold navigation, Save/Load and backpressure can take longer. Computation time is also separate from the intentionally visible in-game day duration.
+
+The [case study](docs/project_background.md#challenge-2-investigating-visible-stutter) includes the progression, failed approaches and measurement conditions; [dated engineering reports](docs/portfolio-closeout-2026-10-08.md#evidence-and-historical-reports) retain the detailed evidence.
+
+## Reliability and saves
+
+The final implementation verified **732 test cases**: 731 passed in the full run; one stale four-tab expectation was corrected to the intended five-tab contract, and all 12 tests in that module then passed. Production code and the other tests were unchanged. This is an aggregate verified result, not a claim of a second clean full-suite run.
+
+Validation includes seeded replay, exact world/RNG comparisons, 365-day runs, 5/20/50-year coarse-history checks with 365-day burn-in, multi-seed checks, Save/Load continuation, UI navigation, journal replay and actual subprocess crash probes. [Current verification and its limits](docs/portfolio-closeout-2026-10-08.md) distinguish these checks from historical counts and remote CI.
+
+The live writer journals a materialized batch durably before publishing it, then commits it through the single DuckDB owner. Save, Load, history queries and shutdown use ordered barriers. A bounded queue applies backpressure; durability is not replaced by an in-memory queue.
+
+Current **V9 checkpoints** preserve required bounded computational history and RNG state. Checkpoint and matching DuckDB history belong together: the save is not a backup of the whole analytical archive. Compatible older saves have explicit migration paths, but data omitted by an older writer cannot be reconstructed. Reproducibility requires the same model and compatible dependency versions. See [model assumptions and save semantics](docs/model_assumptions.md).
+
+## Installation and first run
+
+Use **Python 3.11 or 3.12** with a graphical desktop. The package requires Python >=3.11; local release checks use **Windows and Python 3.12.14**. The CI workflow targets Windows/Linux on 3.11/3.12; workflow configuration alone does not establish a passing run. Linux also needs Qt's system libraries.
+
+From a checkout, in Windows PowerShell:
 
 ```powershell
 python -m venv .venv
@@ -22,96 +109,13 @@ python -m venv .venv
 .\.venv\Scripts\python.exe kojakstreet_qt_launcher.py
 ```
 
-The installed entry point is `.\.venv\Scripts\kojakstreet-qt.exe`.
-On Linux, use `.venv/bin/python` and `.venv/bin/kojakstreet-qt` instead.
-A working graphical desktop and Qt system libraries are required for the UI.
-For a first tour, choose **Genesis World**, seed **1729**. Open Markets,
-Supply Chain, Macro and Portfolio. Run through the first monthly report on
-the 15th, pause, inspect a company, and place a small spot trade.
-Use a larger desktop window for dense portfolio/detail tables; some views
-require scrolling at 1366×768.
+Alternatively launch the installed entry point: `.\.venv\Scripts\kojakstreet-qt.exe`. On Linux, use `.venv/bin/python` and `.venv/bin/kojakstreet-qt`.
 
-The supported delivery path for this revision is **source / Python wheel**.
-The experimental Windows executable is **not release-approved**: its previous
-frozen smoke test did not finish. Building an EXE is not evidence that it starts.
+Choose Genesis World, seed 1729, for a common starting baseline; choose Heterogeneous for immediate size diversity. Run through the first monthly report on the 15th, pause, open a company detail and place a small spot trade. Explore Macro → country → Society & Politics, Supply Chain and Portfolio. Dense tables may require scrolling on smaller displays. [Demo scenarios](docs/demo_scenarios.md) provide a short guided tour.
 
-## Two starting worlds
+Source and Python wheel are the supported delivery paths. The experimental frozen Windows executable is **not release-approved**; its earlier startup smoke did not finish.
 
-- **Genesis World** starts a young fictional economy immediately. The baseline
-  contains 20 countries, 16 sectors and 1,280 companies, alongside commodities,
-  processed products, crypto assets, funds/ETFs, indices, bonds and derivatives.
-- **Established World** offers 50, 75 or 100 years of prehistory in a separate
-  generator process. Its default is **Fast History V2**: correlated yearly and
-  monthly steps, a rebaseline of the live state, then 365 days of the normal
-  daily simulation as burn-in. The entire prehistory is **not** calculated with
-  the same daily production economy. Generation can be cancelled and restarted;
-  resuming a partial generation is not supported.
-
-World bundles contain a checkpoint, DuckDB history and integrity metadata.
-The optional production-equivalent generator path is separate from the UI's
-Fast History default. Short generation tests do not establish economic
-stability over a century.
-
-## Four views of one model
-
-| Markets and company drivers | Production and supply chains |
-| --- | --- |
-| ![Markets](screenshots/01_markets_overview.png) | ![Supply chain](screenshots/03_supply_chain.png) |
-
-| Country macro conditions | Portfolio and exposure |
-| --- | --- |
-| ![Macro](screenshots/05_macro_dashboard.png) | ![Portfolio](screenshots/07_portfolio_overview.png) |
-
-These overview images illustrate the interface; they are not evidence of a
-particular shock outcome or the latest test result.
-
-The executable model includes production recipes and trade flows, revenue/FCF
-and company distress, monetary/fiscal conditions, expectations, fixed income,
-FX, options, futures, swaps and CDS. Portfolio mechanics include spot and
-leveraged positions, FX balances, credit, liquidation and settlement. Aggregate
-portfolio values use GD; instrument rows retain their labelled currencies.
-
-## Saves and history
-
-New **V6 checkpoints** retain the bounded computational histories and numerical
-caches required for continuation, together with Python and NumPy RNG state.
-Live-reference fund caches are reconstructed from the loaded instruments rather
-than serialized as disconnected copies. Save replacement is atomic, and a
-history manifest prevents attaching the save to an unrelated analytical store.
-Display-only regional and company input/output histories keep their last two
-samples in the checkpoint; older analytical history stays in the matching store.
-
-V4/V5 checkpoints and older legacy saves remain readable through their migration
-paths. Histories omitted by old writers cannot be reconstructed, so identical
-continuation of those old saves is not guaranteed. Keep a backup before moving
-an old save into a new version. Reproducibility assumes the same model and
-compatible dependency versions, not arbitrary future versions.
-
-The UI uses the application's local data directory. Set `KOJAKSTREET_DATA_DIR`
-to a separate directory for a demo or test; a direct source runtime otherwise
-uses `.cache`. Checkpoint and matching DuckDB history belong together. The live
-world keeps bounded lookbacks; DuckDB retains recent daily data and semantic
-monthly/yearly summaries. Adaptive ALL charts limit the displayed payload.
-Synthetic long-history query tests are not thousand-year economic simulations.
-
-## Verification and wheel installation
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m compileall -q src tests tools
-.\.venv\Scripts\python.exe tools/wheel_smoke.py
-.\.venv\Scripts\python.exe tools/source_smoke.py --output .cache/source-smoke.json
-```
-
-The source smoke drives the real New Simulation / live-worker path offscreen,
-including trading, monthly processing and continuation after Save/Load.
-The wheel smoke checks installed project imports outside the checkout. See the
-[release-readiness report](docs/release-readiness-2026-09-28.md) for actual test
-counts, environment, results and remaining limitations; historical pass counts
-are not current guarantees. The [CI workflow](.github/workflows/ci.yml) defines
-Windows/Linux checks; its presence alone does not mean remote CI has passed.
-
-To build a wheel and install it into a fresh environment:
+To build and install a wheel in another environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip wheel . --no-deps --wheel-dir dist
@@ -120,33 +124,27 @@ python -m venv .venv-wheel
 .\.venv-wheel\Scripts\kojakstreet-qt.exe
 ```
 
-`requirements-tested-py312.txt` records tested direct dependencies; it is not a
-complete cross-platform lockfile. A future unpinned dependency upgrade is not
-covered by the current verification.
+Dependencies include NumPy, DuckDB, PySide6 and pyqtgraph. [requirements-tested-py312.txt](requirements-tested-py312.txt) records tested direct versions, not a complete cross-platform lockfile. The application uses a local data directory; set `KOJAKSTREET_DATA_DIR` to isolate a demo or test.
 
-## Design, background and limits
+Useful checks from a development installation:
 
-Özay Kocak supplied the product idea, financial concepts, priorities and
-acceptance decisions, drawing on banking practice and self-directed learning.
-LLM/Codex assisted planning, implementation, refactoring, tests and debugging.
-This describes the development workflow; the application does not contain a
-claimed AI market-prediction engine, and no hand-written share of the code is
-asserted.
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m compileall -q src tests tools
+.\.venv\Scripts\python.exe tools/wheel_smoke.py
+.\.venv\Scripts\python.exe tools/source_smoke.py --output .cache/source-smoke.json
+```
 
-Prices and economic outcomes are fictional and rule-based with seeded random
-components. Internal consistency and scenario tests do not establish empirical
-forecasting, risk or pricing accuracy. An oil supply shock can increase shortage
-and price pressure without a reliably higher final oil price when other model
-channels dominate. Not for real trading, investment advice or regulatory use.
+The source smoke exercises the real chooser/live-worker path, trading, a monthly report, Save/Load continuation and shutdown. The wheel smoke checks installed imports outside the checkout. See the [CI workflow](.github/workflows/ci.yml).
 
-- [Architecture and modern versus legacy entry points](docs/architecture.md)
-- [Model assumptions and units](docs/model_assumptions.md)
-- [Demo themes](docs/demo_scenarios.md)
-- [Project background](docs/project_background.md)
-- [Release-readiness and remaining risks](docs/release-readiness-2026-09-28.md)
+## Scope and limitations
 
-The modern application lives under `src/kojakstreet`; `daten.py` and
-`speicher.py` remain active compatibility modules. The older root-level
-Tkinter application is not the supported entry point for this revision.
+This is a synthetic learning and portfolio project. Internal consistency is not evidence of empirical forecasting or calibrated pricing accuracy. It is unsuitable for real investment decisions or regulatory use. Transaction fees, taxes and slippage are excluded; derivative and credit models are deliberately simplified.
 
-Released under the [MIT License](LICENSE).
+Workforce uses aggregate equivalents rather than individual people, wage bargaining, migration or education cohorts. Politics V1 is descriptive and event-based; it is not a political grand-strategy game. A separate housing/real-estate market is outside the completed scope, although real-estate companies are part of the equity sectors. Precomputation and the political bond premium remain disabled for the reasons documented above.
+
+Feature freeze defines the delivered portfolio scope; it does not rule out future development. `src/kojakstreet` contains the supported application; `daten.py` and `speicher.py` remain active compatibility modules. The old root-level Tkinter application is not the supported entry point.
+
+**Author:** Özay Kocak · Banking, business analysis and self-directed product/software learning. Built through domain knowledge, AI-assisted implementation, measurement and iterative validation.
+
+Read the [case study](docs/project_background.md), [architecture](docs/architecture.md) and [model assumptions](docs/model_assumptions.md). Released under the [MIT License](LICENSE).

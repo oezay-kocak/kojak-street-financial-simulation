@@ -1,102 +1,71 @@
 # Architecture
 
-Kojak Street is transitioning from an early prototype with legacy root modules
-into a package-based architecture under `src/kojakstreet`.
+The supported application is the package-based Python/Qt desktop runtime. Root modules `daten.py` and `speicher.py` remain active compatibility boundaries; the older Tkinter entry point is not the supported release path.
 
-The current architecture preserves the old application while building a modern
-Qt runtime around shared core logic.
+Normal startup opens the world chooser through `kojakstreet_qt_launcher.py` or the installed `kojakstreet-qt` command. A bootstrap runtime initializes the chosen world, then `LiveSimulationProcess` hands its checkpoint/history to `live_worker.py`. The live process owns one authoritative mutable world. Qt owns projections, table models and bounded chart caches.
 
-The supported entry point is `kojakstreet_qt_launcher.py` or the installed
-`kojakstreet-qt` command. Normal startup opens the world chooser, then hands the
-runtime to `LiveSimulationProcess`; `live_worker.py` owns the mutable world in
-a separate process. Qt receives view snapshots, current rows and asynchronous
-history responses. The small `--smoke-test` path does not exercise that handoff.
-
-Genesis creates a fresh world. Established World's default generator uses
-Fast History V2 (yearly/monthly steps, rebaseline, then daily burn-in), not a
-daily production-equivalent simulation of the entire prehistory. Checkpoint V6
-preserves bounded numerical history/state while rebuilding reference caches.
-
-```mermaid
-flowchart TD
-    A["Legacy state: daten.py"] --> B["SimulationState adapter"]
-    B --> C["DailySimulation"]
-    C --> D["Macro Engine"]
-    C --> E["Production Engine"]
-    C --> F["Asset Market Engine"]
-    C --> G["Bond Portfolio Engine"]
-    C --> H["Financial Products"]
-    C --> I["Portfolio Risk"]
-    B --> J["EconomicDataStore"]
-    J --> K["Current rows and histories"]
-    K --> L["PySide6 UI"]
-    B --> L
-    L --> M["TradingService"]
-    M --> I
-```
-
-## Simulation Flow
+## Ownership and data flow
 
 ```mermaid
 flowchart LR
-    A["Events"] --> B["Global Macro"]
-    B --> C["Production and Supply Chains"]
-    C --> D["Credit Interest"]
-    D --> E["Bond Market"]
-    E --> F["Asset Markets"]
-    F --> G["Derivatives"]
-    G --> H["Derivative Settlement"]
-    H --> I["Portfolio Liquidation"]
-    I --> J["Bond Portfolio"]
-    J --> K["Save current rows"]
+    G[World generation] --> W[Live worker: economic world and player accounting]
+    U[Qt desktop UI] -->|Commands and visible scope| W
+    W -->|Current visible state| U
+    W -->|Immutable rows and durable journal| P[Single ordered writer]
+    P --> D[(DuckDB history)]
+    D -->|Requested history| W
 ```
 
-## Core Modules
+The normal day path computes the world's daily phases and player consequences in order. It publishes globally visible status, active-view current rows and selected entity/tab details through explicit scopes. Hidden views are not maintained as a full mirrored world. Opening a view or detail requests its current scope; deeper history uses a separate asynchronous request path.
 
-- `core/simulation.py`: daily simulation orchestration
-- `core/market_calculations.py`: asset price updates
-- `core/production_chains.py`: commodities, processed products and trade flows
-- `core/company_lifecycle.py`: company fundamentals, ratings and hedging
-- `core/financial_products.py`: derivative universe and pricing rules
-- `core/trading.py`: portfolio trading mutations
-- `core/trade_preview.py`: non-mutating trade validation and previews
-- `core/accounting.py`: portfolio value and currency conversion
-- `core/save_migrations.py`: explicit savegame migration pipeline
-- `core/market_data_service.py`: central market-data lookup interface
-- `core/data_store.py`: DuckDB-backed current rows and histories
+The full snapshot/delta utilities remain available for explicit diagnostic/compatibility purposes. Their presence does not mean normal ticks recursively synchronize the complete public world. Recent computational lookbacks stay in the authoritative world; Qt charts retain existing series while new history arrives and reject obsolete responses.
 
-## UI Modules
+## Economic and player boundaries
 
-- `ui_qt/app.py`: main application shell and runtime orchestration
-- `ui_qt/views/markets_view.py`: market universe, filters and asset details
-- `ui_qt/views/portfolio_view.py`: positions, bonds, futures, FX and exposure
-- `ui_qt/views/supply_chain_view.py`: product flows and regional trade
-- `ui_qt/views/macro_view.py`: country-level macro dashboard
-- `ui_qt/widgets/stock_detail_dialog.py`: detailed asset inspection
-- `ui_qt/widgets/asset_chart_panel.py`: quote, chart and order ticket
+`core/simulation.py` orchestrates events, macroeconomics, production, credit, markets, derivatives and accounting. World preparation and ordered player commit preserve daily booking and settlement semantics.
 
-## Engineering Principles
+Ordinary player trades/holdings have retail-investor semantics: they do not enter global open interest, crypto universe survival or world RNG decisions. Player accounting retains cash conversion, interest, coupons/dividends, PnL, margin, liquidation and settlement. Simulated institutional fund flows remain economic inputs.
 
-- Preserve the legacy app while migrating vertical slices.
-- Move business rules into `core` before exposing them in the UI.
-- Prefer deterministic, testable helpers for pricing and accounting behavior.
-- Keep trade validation non-mutating and separate from trade execution.
-- Store model assumptions explicitly instead of hiding simplifications.
-- Use performance budgets to keep the app responsive.
+Workforce is aggregated and applied monthly. Population uses explicit annual rates and elapsed-period conversion. Politics updates monthly and on events with country-local deterministic streams. Its ideology axes are descriptive; `PREMIUM_ENABLED = False` keeps the proposed sovereign-bond premium inactive.
 
-## Current Verification
+There is no live speculative N+1 world. Full/partial precomputation was rejected after the copied-world readiness/cost experiment. UI continuity does not depend on speculation.
 
-The project includes tests for:
+## World generation and randomness
 
-- financial products and derivative settlement
-- trading validation
-- bonds and portfolio valuation
-- supply chains and production signals
-- market behavior and volatility
-- savegame migration
-- Qt view behavior
-- runtime integration
-- performance budgets
+- **Genesis:** common Day-1 macro/company-size roots and the regular bootstrap.
+- **Heterogeneous:** one-time controlled population, GDP/productivity and company-capitalization roots, preserving initial global budgets. Existing formulas derive subsequent books; no fake prehistory or recurring diversity generator is introduced.
+- **Established:** the UI offers 50/75/100 years. Fast History V3 uses coarse historical steps, rebaseline and 365 ordinary daily burn-in steps in an isolated generator process. This is not a full daily simulation of the entire historical interval.
 
-Current verification and limitations are recorded in
-[the release-readiness report](release-readiness-2026-09-28.md).
+Seed-derived initialization, workforce/politics and player RNG boundaries avoid unintended consumption of the daily economic stream. Checkpoints retain Python/NumPy state. Exact continuation is version-dependent, not a promise across arbitrary model or dependency upgrades.
+
+## Persistence and recovery
+
+The live worker enables a single ordered background DuckDB owner. Direct integrated runtimes default to synchronous persistence unless explicitly configured otherwise.
+
+Rows are materialized before submission; the writer receives immutable values rather than live world references. Publication follows a length/checksum/history-identity/sequence-validated, fsynced journal. DuckDB transactions commit before a durable acknowledgement. Recovery replays unacknowledged batches idempotently.
+
+Two reusable journal slots and at most two outstanding batches bound work in flight; the task queue has capacity three. Batches above the 64 MiB limit use the synchronous fallback. Another submission waits under backpressure. Writer failures are latched and exposed, not silently ignored.
+
+Save, Load, history reads and shutdown use ordered barriers. V9 checkpoints preserve bounded computational state and RNG, with explicit readers/migrations for supported older formats. Numerical nested state is preserved; reference caches are rebuilt. Display-only regional/company input-output histories keep two checkpoint samples, while analytical history remains in the matching DuckDB store.
+
+A checkpoint and its matching history identity belong together. Loading discards the abandoned timeline rather than attaching an unrelated store. The archive is not embedded in the checkpoint. Raw detail is retained for 730 days, semantic monthly aggregates for 20 years and yearly aggregates permanently; structural events have their own permanent ledger. Rates, levels, flows and prices use different aggregation semantics.
+
+## Module map
+
+| Responsibility | Main modules under `src/kojakstreet` |
+| --- | --- |
+| Runtime ownership and transport | `adapters/legacy_runtime.py`, `live_process.py`, `live_worker.py` |
+| Visible state and current rows | `visible_state.py`, `core/market_data_service.py` |
+| Economic phases | `core/simulation.py`, `core/production_chains.py`, `core/market_calculations.py`, `core/company_lifecycle.py` |
+| Credit and financial products | `core/bond_calculations.py`, `core/funds.py`, `core/financial_products.py` |
+| Retail accounting/trading | `core/player_accounting.py`, `core/accounting.py`, `core/trading.py`, `core/trade_preview.py` |
+| Society and politics | `core/workforce.py`, `core/politics.py` |
+| Starting worlds | `world_generator.py`, `core/established_world.py`, `core/fast_history.py`, `core/heterogeneous_start.py` |
+| Checkpoints and history | `core/checkpoints.py`, `core/save_migrations.py`, `core/history.py`, `core/data_store.py`, `core/persistence_writer.py` |
+| Desktop interface | `ui_qt/app.py`, `ui_qt/views/`, `ui_qt/widgets/`, `ui_qt/models/` |
+
+## Validation boundaries
+
+Small behavioral tests, real live-process UI checks, exact economics/RNG comparisons, long generation runs and subprocess crash probes serve different purposes. Timing diagnostics and independently generated history IDs are not economic fields. Native parallel SQL yearly averages have a documented least-significant-bit ordering limitation; controlled single-thread checks establish exact aggregate equality.
+
+See the [current verification record](portfolio-closeout-2026-10-08.md), [case study](project_background.md) and [model assumptions](model_assumptions.md). The [September release report](release-readiness-2026-09-28.md) is historical evidence for its own source revision.

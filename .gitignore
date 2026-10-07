@@ -20,6 +20,10 @@ htmlcov/
 spielstand.dat
 *.duckdb
 *.duckdb.wal
+*.log
+.env
+.env.*
+!.env.example
 
 # Local diagnostics, raw results and draft reports are not release content.
 artifacts/

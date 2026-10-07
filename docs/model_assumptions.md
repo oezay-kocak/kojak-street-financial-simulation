@@ -133,7 +133,7 @@ The model should not be interpreted as:
 - a regulatory model
 - a backtesting system for real strategies
 
-It is a financial engineering showcase focused on architecture, interaction
+It is a personal learning and portfolio project focused on architecture, interaction
 between model components, explainability and LLM-assisted development.
 
 ## Clarified units and checkpoint semantics (September 2026)
@@ -158,7 +158,7 @@ between model components, explainability and LLM-assisted development.
   this phase also books that day's production/inventories, so the daily-only
   production phase is skipped to avoid booking them twice. Prices, interest, settlement, portfolio history and date advance
   occur once through the ordinary daily phases.
-- V6 checkpoints resume the same model/dependency version with complete RNG state
+- Current V9 checkpoints resume the same model/dependency version with complete RNG state
   and a verified DuckDB history manifest. They preserve bounded live lookbacks;
   old daily history belongs to the analytical store rather than being duplicated
   without limit in JSON.
@@ -176,6 +176,45 @@ between model components, explainability and LLM-assisted development.
   and reconnects only to a matching history identity. The checkpoint is not a
   backup of the DuckDB archive; copying it without the matching store cannot
   reproduce old ALL/MAX history.
+
+## Retail investor, starting worlds and society (October 2026)
+
+- Ordinary player trades and holdings do not affect global price formation or
+  world RNG. Institutional fund-flow pressure remains part of the economy.
+  Player cash, PnL, margin, liquidation, dividends/coupons and settlement remain
+  active and receive the consequences of world changes.
+- Genesis uses common macro/company-size roots. Heterogeneous varies country
+  population/GDP/productivity and company sizes once, preserving initial global
+  budgets and deriving downstream state through the existing bootstrap. Neither
+  mode fabricates prehistory. Established uses coarse historical development
+  followed by 365 regular daily burn-in steps; it is not decades of full daily
+  simulation.
+- Basic, Skilled and Highly Qualified pools measure abstract workforce
+  equivalents. Company requirements are aggregated monthly. Shortage effects
+  are bounded and monthly; excess coverage gives no symmetric surplus bonus.
+  Macro headline unemployment remains independent of workforce coverage.
+- Population combines annual birth/death rates with a bounded macro adjustment
+  using the actual elapsed reporting interval. Realized population growth is
+  reported only after observation. There are no individual age cohorts,
+  migration, education transitions, wage bargaining or changing skill shares.
+- Politics V1 has seven government systems, competitive elections where
+  applicable, government formation, descriptive ideology axes and stability.
+  It stores current state, monthly observations and sparse events. Initial
+  mandates are distinct from an election that actually occurred. It is not a
+  complete policy or political grand-strategy model.
+- The political sovereign-bond risk premium is disabled. Coarse-history bond,
+  curve, fund-NAV and yield-derivative consistency did not satisfy its release
+  gate. No political price impact through that premium is claimed.
+- Current checkpoints read supported V4–V9 formats explicitly. Older models
+  activate new society features without inventing a past series. Compatibility
+  does not recreate missing data or guarantee cross-model numerical identity.
+- A single ordered writer owns DuckDB in the live process. Durable journaling,
+  transaction commit, replay, barriers and backpressure protect exact rows;
+  native parallel yearly averages retain a documented floating-point ordering
+  limitation. Full/partial speculative next-day precomputation is disabled.
+
+See the [current architecture](architecture.md) and
+[verification record](portfolio-closeout-2026-10-08.md).
 
 ## Deep-history retention and aggregation
 

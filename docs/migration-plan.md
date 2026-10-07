@@ -1,5 +1,10 @@
 # Kojak Street Migration Plan
 
+> Historical early design plan, retained to document the project's evolution.
+> Proposed phases and features below are not the current backlog or required
+> release scope. The supported architecture and delivered feature freeze are
+> described in the [architecture](architecture.md) and [README](../README.md).
+
 ## Goal
 
 Move Kojak Street from a first-generation Tkinter prototype into a stable,

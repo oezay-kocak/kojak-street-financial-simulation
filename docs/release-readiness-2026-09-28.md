@@ -1,5 +1,12 @@
 # Source / wheel release readiness — 28 September 2026
 
+> Dated engineering evidence for the revision described below. Test counts,
+> model versions and measurements are historical unless explicitly carried
+> into the [current verification record](portfolio-closeout-2026-10-08.md).
+> Raw cache artifacts remain local; source links identify modules, not the
+> original audit line numbers.
+
+
 This report covers the repaired working tree, including the previously unpublished
 modern runtime, history, generation and UI modules. It supersedes the earlier
 diagnostic conclusion for this revision only. The historical local portfolio

@@ -58,7 +58,11 @@ def run(output: Path, timeout: float = 180.0) -> int:
                     record("All nine views navigated with live subprocess")
                     window.set_active_view("markets")
                     window._execute_trade("STONE", "SPOT", "BUY", 10.0, 1)
+                    # Portfolio fields are intentionally absent from a Markets
+                    # projection. Verify the trade through its actual UI scope.
+                    window.set_active_view("portfolio")
                     assert window.runtime.state.portfolio["STONE"]["stueck"] == 10
+                    window.set_active_view("markets")
                     window._execute_trade("XAU", "FUTURE", "LONG", 100.0, 2)
                     window.set_active_view("portfolio")
                     assert len(window.state.perpetuals) == 1

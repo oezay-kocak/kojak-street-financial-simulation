@@ -16,7 +16,7 @@ then start the Qt application from the checkout:
 
 Recommended demo setup:
 
-- choose Genesis World and seed 1729 for a fresh simulation state
+- choose Genesis World and seed 1729 for a common baseline, or Heterogeneous World for immediate size diversity
 - advance the simulation by several months before opening the analytical views
 - use the market, macro, supply-chain, bond and portfolio views as the core tour
 - keep the focus on model interaction, not on investment advice
@@ -153,15 +153,11 @@ Suggested flow:
 4. Verify that supply-chain metrics stay bounded.
 5. Verify that the active bond market is capped and older issues are archived.
 
-Latest local verification:
-
-```text
-3 simulation years completed
-active bond market capped at 2,400
-1,116 older bond issues archived
-CDS pricing notes present
-226 automated tests passed
-```
+Verification evidence includes 365-day daily runs and 5/20/50-year coarse
+Established histories with 365 regular daily burn-in steps. These are distinct
+checks, not a claim of decades of full daily simulation. See the
+[current verification record](portfolio-closeout-2026-10-08.md) for test counts,
+conditions and limitations.
 
 What this demonstrates:
 
@@ -169,3 +165,16 @@ What this demonstrates:
 - the state can evolve over long periods
 - performance and data growth are monitored
 - known simplifications are documented transparently
+
+## Scenario 7: Society and Politics
+
+1. Open Macro and double-click a country.
+2. Select Society & Politics.
+3. Compare population, annual birth rate and observed population growth.
+4. Inspect the Basic, Skilled and Highly Qualified supply/demand coverage.
+5. Read the government system, stability, ideology axes and government status.
+6. Distinguish initial mandates from an actual recorded election. Heterogeneous
+   has no invented past elections; Established includes generated historical events.
+
+Workforce coverage is not the macro unemployment rate. The political
+government-bond risk premium is disabled in this release.
