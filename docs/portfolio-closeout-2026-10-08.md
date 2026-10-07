@@ -78,6 +78,25 @@ Local checks do not establish a passing remote CI matrix. The repository's
 [workflow](../.github/workflows/ci.yml) targets Windows/Linux on Python 3.11/3.12.
 Remote publication/check status is reported separately at completion.
 
+### GitHub readback and Linux CI setup correction
+
+The runtime and documentation were published as normal fast-forward commits
+`44a102e` and `182a30b`. GitHub returned the current README and Case Study with
+HTTP 200 and rendered HTML, including all six README images and the case-study
+image. The branch head was independently checked against the published commit.
+
+The [initial CI run](https://github.com/oezay-kocak/kojak-street-financial-simulation/actions/runs/37695754976)
+then exposed a runner setup defect: Linux collection failed with
+`ImportError: libEGL.so.1: cannot open shared object file`. This happened before
+the tests executed. The workflow now installs Ubuntu's
+[EGL](https://packages.ubuntu.com/noble/libegl1),
+[GL](https://packages.ubuntu.com/noble/libgl1) and
+[OpenGL](https://packages.ubuntu.com/noble/libopengl0) system libraries before
+importing Qt. Matrix fail-fast is disabled so one environment does not cancel
+the other independent checks. No product behavior, test expectation or timing
+threshold was changed for this correction. The new CI run is a separate
+verification; passing local results do not establish its final outcome.
+
 ## Screenshots and repository hygiene
 
 The six PNGs under `docs/assets/` show Heterogeneous World, seed 1729, after **75
