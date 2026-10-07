@@ -112,6 +112,8 @@ The final full run collected 732 cases: 731 passed and one failed because an old
 
 Long-run checks validate the tested configurations, not every imaginable seed or a century of full daily economics. Reproducibility also depends on model/dependency versions. A save checkpoint and its analytical history store have separate responsibilities and must remain paired.
 
+Final publication checks also found missing Qt system libraries on the Linux CI runner and a pre-existing string-syntax incompatibility with Python 3.11. Those release issues were corrected without changing the economic model. The repaired portfolio module has the same parsed behavior on Python 3.12; targeted UI and installed-runtime checks were repeated, alongside a real Python 3.11 syntax check of all repository Python files.
+
 ## Decisions about scope
 
 Several decisions define the delivered product:

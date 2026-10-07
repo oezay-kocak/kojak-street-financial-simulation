@@ -436,7 +436,7 @@ class PortfolioView(QFrame):
                         f"{last:,.2f}",
                         regional_money(value, str(position.get("land", "GD"))),
                         _expiry_label(position.get("expires_at")),
-                        f"{regional_money(pnl, str(position.get("land", "GD")))} | Liq {liquidation_price(position):,.2f}",
+                    f"{regional_money(pnl, str(position.get('land', 'GD')))} | Liq {liquidation_price(position):,.2f}",
                     ],
                 }
             )

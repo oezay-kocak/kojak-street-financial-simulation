@@ -5,7 +5,9 @@
 This documentation/repository pass publishes the previously implemented runtime,
 starting worlds, workforce/demography and Politics V1 together with an updated
 English [README](../README.md) and [case study](project_background.md). No new
-product feature or architecture change was introduced in this closeout.
+product feature or architecture change was introduced in this closeout. A
+pre-existing Python 3.11 syntax incompatibility found by publication checks was
+repaired without changing the portfolio display's behavior.
 
 ## Fact check
 
@@ -36,10 +38,13 @@ performance claim. It does not mean that each field was an expensive calculation
 The existing final implementation run collected **732 cases**, with **731 passed
 and one failed** in 2,087.724 seconds. The failure was a stale four-tab expectation.
 After updating it to the intended five-tab contract, all **12 module tests passed**.
-The unique case-identity union verifies all 732. All 203 source/test files match
-the tested closeout state after excluding final-newline normalization. Publication
-hygiene removed one surplus blank line at EOF in a persistence test; no executable
-production or test code changed. One report generator received the same EOF cleanup.
+The unique case-identity union verifies all 732. At the start of this task, all
+203 source/test file hashes matched the tested implementation state. Publication
+hygiene removed one surplus blank line at EOF in a persistence test. Subsequently,
+the proven Python 3.11 compatibility repair changed only string quoting in one
+portfolio display expression. Its entire Python 3.12 AST remains identical to
+the tested module. All other production/test files are unchanged. One report
+generator also received an EOF cleanup.
 
 Additional closeout checks:
 
@@ -96,6 +101,22 @@ importing Qt. Matrix fail-fast is disabled so one environment does not cancel
 the other independent checks. No product behavior, test expectation or timing
 threshold was changed for this correction. The new CI run is a separate
 verification; passing local results do not establish its final outcome.
+
+After Linux setup succeeded, the Python 3.11 job in
+[the next run](https://github.com/oezay-kocak/kojak-street-financial-simulation/actions/runs/37696298709)
+exposed a pre-existing f-string in `ui_qt/views/portfolio_view.py` that reused
+the outer quotation mark inside an expression. Python 3.12 accepts that spelling;
+Python 3.11 does not. Switching the inner dictionary-key/default strings to
+single quotes restores the declared compatibility without changing their values.
+The complete module AST is identical to the tested version on Python 3.12.
+
+All **297 publishable Python files** passed the native Python **3.11.9** AST
+parser. The official portable interpreter was used only for syntax checks in
+the ignored evidence directory; it was not installed system-wide or used to
+claim a full Python 3.11 application test. After the quoting repair, the same
+**37 UI tests passed** again, compilation passed, and the complete source smoke
+passed again in **31.728 seconds**. The wheel was rebuilt and its full installed
+smoke repeated successfully. Remote matrix execution remains a separate result.
 
 ## Screenshots and repository hygiene
 

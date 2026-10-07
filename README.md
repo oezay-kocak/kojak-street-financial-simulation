@@ -88,7 +88,7 @@ The [case study](docs/project_background.md#challenge-2-investigating-visible-st
 
 ## Reliability and saves
 
-The final implementation verified **732 test cases**: 731 passed in the full run; one stale four-tab expectation was corrected to the intended five-tab contract, and all 12 tests in that module then passed. Production code and the other tests were unchanged. This is an aggregate verified result, not a claim of a second clean full-suite run.
+The final implementation verified **732 test cases**: 731 passed in the full run; one stale four-tab expectation was corrected to the intended five-tab contract, and all 12 tests in that module then passed. Production code and the other tests were unchanged between those runs. This is an aggregate verified result, not a claim of a second clean full-suite run. Final publication checks also repaired Linux Qt setup and a pre-existing Python 3.11 string-syntax incompatibility, with unchanged display behavior and renewed UI/installation checks.
 
 Validation includes seeded replay, exact world/RNG comparisons, 365-day runs, 5/20/50-year coarse-history checks with 365-day burn-in, multi-seed checks, Save/Load continuation, UI navigation, journal replay and actual subprocess crash probes. [Current verification and its limits](docs/portfolio-closeout-2026-10-08.md) distinguish these checks from historical counts and remote CI.
 
